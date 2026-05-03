@@ -1,0 +1,48 @@
+{
+  "name": "ekko-desktop-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop frontend shell for EKKO voice chat.",
+  "author": "EKKO",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && set EKKO_RENDERER_URL=http://127.0.0.1:5173&& electron electron/main.cjs\"",
+    "build:renderer": "tsc -b && vite build",
+    "build": "npm run build:renderer && electron-builder",
+    "preview": "vite preview",
+    "start": "electron electron/main.cjs"
+  },
+  "dependencies": {
+    "livekit-client": "^2.18.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "concurrently": "^9.1.0",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.ekko.desktop",
+    "productName": "EKKO Desktop",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "public/assets"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

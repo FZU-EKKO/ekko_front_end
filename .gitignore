@@ -1,0 +1,46 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*.tmp
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node / frontend
+node_modules/
+desktop-app/node_modules/
+dist/
+build/
+coverage/
+.vite/
+desktop-app/dist/
+desktop-app/dist-electron/
+desktop-app/release/
+desktop-app/out/
+*.tsbuildinfo
+
+# Electron builder artifacts
+*.exe
+*.msi
+*.nupkg
+*.blockmap
+
+# Misc local assets
+picture/
+test/
+image.png
+image-1.png
