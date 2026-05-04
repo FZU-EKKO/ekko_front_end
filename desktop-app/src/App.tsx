@@ -1816,6 +1816,7 @@ export default function App() {
   const [tempMicProbeDetail, setTempMicProbeDetail] = useState("");
   const [tempAppliedInputDeviceLabel, setTempAppliedInputDeviceLabel] = useState("未验证");
   const [tempAppliedOutputDeviceLabel, setTempAppliedOutputDeviceLabel] = useState("未验证");
+  const [noiseFilterPending, setNoiseFilterPending] = useState(false);
   const roomRef = useRef<Room | null>(null);
   const localMicrophoneTrackRef = useRef<LocalAudioTrack | null>(null);
   const temporaryMicrophoneTrackRef = useRef(false);
@@ -2238,6 +2239,32 @@ export default function App() {
         setVoiceError(formatMediaAccessError(error));
       });
   }, [selectedInputDeviceLabel, settings.inputDevice, voiceConnectionState]);
+
+  useEffect(() => {
+    if (!localMicrophoneTrackRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    setNoiseFilterPending(true);
+
+    const activeRoom = temporaryMicrophoneTrackRef.current ? null : roomRef.current;
+    void prepareLocalMicrophoneTrack(activeRoom)
+      .catch((error) => {
+        if (!cancelled) {
+          setVoiceError(formatMediaAccessError(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setNoiseFilterPending(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.noiseSuppression]);
 
   useEffect(() => {
     return () => {
@@ -3271,7 +3298,7 @@ export default function App() {
       domain_name: `新域 ${count}`,
       slug: `workspace-${count}`,
       description: "新创建的域。",
-      is_public: false,
+      is_public: true,
       created_at: now,
       updated_at: now,
     };
@@ -3344,7 +3371,7 @@ export default function App() {
             avatar: nextAvatar,
             domain_name: nextName,
             description: `${nextName} 工作区`,
-            is_public: false,
+            is_public: true,
           }),
         },
         token,
@@ -4873,6 +4900,7 @@ export default function App() {
                           className={`settings-toggle ${settings.noiseSuppression ? "on" : ""}`}
                           type="button"
                           aria-pressed={settings.noiseSuppression}
+                          disabled={noiseFilterPending}
                           onClick={() => setSettings((current) => ({ ...current, noiseSuppression: !current.noiseSuppression }))}
                         >
                           <span className="settings-toggle-knob" />

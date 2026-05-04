@@ -1,7 +1,7 @@
 {
-  "name": "ekko-desktop-app",
+  "name": "EKKO",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop frontend shell for EKKO voice chat.",
   "author": "EKKO",
   "type": "module",
@@ -10,11 +10,12 @@
     "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && set EKKO_RENDERER_URL=http://127.0.0.1:5173&& electron electron/main.cjs\"",
     "build:renderer": "tsc -b && vite build",
     "build": "npm run build:renderer && electron-builder",
+    "build:win": "npm run build",
     "preview": "vite preview",
     "start": "electron electron/main.cjs"
   },
   "dependencies": {
-    "livekit-client": "^2.18.3",
+    "livekit-client": "^2.18.8",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -32,17 +33,36 @@
   },
   "build": {
     "appId": "com.ekko.desktop",
-    "productName": "EKKO Desktop",
+    "productName": "EKKO",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "executableName": "EKKO",
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "public/assets/**/*",
       "package.json"
     ],
     "directories": {
-      "buildResources": "public/assets"
+      "buildResources": "public/assets",
+      "output": "release"
     },
     "win": {
-      "target": "nsis"
+      "icon": "public/assets/E256.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }

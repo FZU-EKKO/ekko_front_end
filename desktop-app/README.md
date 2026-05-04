@@ -1,16 +1,37 @@
 # EKKO Desktop Frontend
 
-## Run
+## Development
 
 1. `cd desktop-app`
 2. `npm install`
 3. `npm run dev`
 
-## Build
+## Production Build
 
 1. `cd desktop-app`
-2. `npm install`
-3. `npm run build`
+2. Create `.env.production` from `.env.production.example`
+3. Set `VITE_API_BASE_URL` to the public backend address, for example `https://api.example.com/api`
+4. `npm install`
+5. `npm run build:win`
+
+Build output:
+
+- Installer: `release/EKKO Desktop-Setup-<version>.exe`
+- Unpacked app: `release/win-unpacked/`
+
+Notes before shipping:
+
+- The backend URL must be public and reachable from user machines.
+- The backend must return a public `wss://` LiveKit address.
+- If you enable Krisp noise cancellation, test first-run model download on a clean machine.
+- Unsigned Windows installers may show "Unknown publisher" warnings.
+- If `electron-builder` fails while extracting `winCodeSign` with a symbolic link permission error, enable Windows Developer Mode or run the packaging terminal with Administrator privileges, then rerun `npm run build:win`.
+
+## Environment Files
+
+- `.env`: local manual override, currently suitable for direct environment testing
+- `.env.example`: local development example
+- `.env.production.example`: production build template for packaged releases
 
 ## Backend Integration
 
@@ -50,3 +71,4 @@
 - The frontend automatically unwraps the `{"code","message","data"}` response envelope returned by `ekko`.
 - User settings are persisted to the backend `users.voice_settings` JSON field after login.
 - Domain and channel views now prefer real backend data and show request errors directly instead of auto-falling back to demo data after login.
+- Windows packaging is handled by `electron-builder` with an NSIS installer and outputs into `release/`.

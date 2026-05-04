@@ -21,9 +21,11 @@ export function createVoiceRoom(options: RoomOptions = defaultVoiceRoomOptions) 
 export function buildMicrophoneCaptureOptions(inputDeviceId: string, noiseSuppression: boolean): AudioCaptureOptions {
   return {
     deviceId: inputDeviceId === "default" ? undefined : inputDeviceId,
+    // Toggle Chromium's built-in microphone processing as one unit so the UI can
+    // switch between raw capture and the browser's default voice cleanup path.
     noiseSuppression,
-    echoCancellation: true,
-    autoGainControl: true,
+    echoCancellation: noiseSuppression,
+    autoGainControl: noiseSuppression,
   };
 }
 

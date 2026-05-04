@@ -2,7 +2,8 @@
 const path = require("node:path");
 
 const devServerUrl = process.env.EKKO_RENDERER_URL;
-const iconPath = path.join(__dirname, "..", "public", "assets", "E.png");
+const assetsDir = path.join(__dirname, "..", "public", "assets");
+const iconPath = path.join(assetsDir, process.platform === "win32" ? "E256.ico" : "E.png");
 const VIEW_BOUNDS = {
   login: { width: 420, height: 420 },
   register: { width: 500, height: 640 },
@@ -28,10 +29,15 @@ function showMainWindow() {
     return;
   }
 
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
   }
 
+  mainWindow.setSkipTaskbar(false);
   mainWindow.show();
   mainWindow.focus();
 }
@@ -81,7 +87,7 @@ function createTray() {
   }
 
   tray = new Tray(iconPath);
-  tray.setToolTip("EKKO Desktop");
+  tray.setToolTip("EKKO");
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "显示窗口", click: () => showMainWindow() },
@@ -94,6 +100,7 @@ function createTray() {
       },
     ]),
   );
+  tray.on("click", () => showMainWindow());
   tray.on("double-click", () => showMainWindow());
   return tray;
 }
@@ -124,6 +131,7 @@ function createWindow() {
 
     if (minimizeToTrayOnClose) {
       event.preventDefault();
+      window.setSkipTaskbar(true);
       window.hide();
       return;
     }
@@ -133,6 +141,10 @@ function createWindow() {
 
   window.on("closed", () => {
     mainWindow = null;
+  });
+
+  window.on("show", () => {
+    window.setSkipTaskbar(false);
   });
 
   if (devServerUrl) {
