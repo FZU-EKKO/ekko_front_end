@@ -4,6 +4,8 @@ type DesktopView = "login" | "register" | "reset" | "workspace" | "settings";
 
 interface ElectronAPI {
   getVersion: () => Promise<string>;
+  getAutoLaunch: () => Promise<boolean>;
+  setAutoLaunch: (enabled: boolean) => Promise<boolean>;
   setView: (view: DesktopView) => Promise<boolean>;
   setMinimizeOnClose: (enabled: boolean) => Promise<boolean>;
   minimizeWindow: () => Promise<boolean>;

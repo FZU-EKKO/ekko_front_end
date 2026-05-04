@@ -159,10 +159,30 @@ function createWindow() {
   return window;
 }
 
+function getAutoLaunchOptions(openAtLogin) {
+  const options = { openAtLogin: Boolean(openAtLogin) };
+
+  if (!app.isPackaged && process.platform === "win32") {
+    options.path = process.execPath;
+    options.args = [path.join(__dirname, "main.cjs")];
+  }
+
+  return options;
+}
+
+function getAutoLaunchEnabled() {
+  return app.getLoginItemSettings(getAutoLaunchOptions(false)).openAtLogin;
+}
+
 app.on("second-instance", () => showMainWindow());
 
 app.whenReady().then(() => {
   ipcMain.handle("app:get-version", () => app.getVersion());
+  ipcMain.handle("app:get-auto-launch", () => getAutoLaunchEnabled());
+  ipcMain.handle("app:set-auto-launch", (_event, enabled) => {
+    app.setLoginItemSettings(getAutoLaunchOptions(enabled));
+    return getAutoLaunchEnabled();
+  });
   ipcMain.handle("app:set-view", (_event, view) => {
     applyViewBounds(view);
     return true;

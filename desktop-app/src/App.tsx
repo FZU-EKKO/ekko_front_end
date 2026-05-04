@@ -1822,6 +1822,7 @@ export default function App() {
   const temporaryMicrophoneTrackRef = useRef(false);
   const remoteAudioElementsRef = useRef(new Map<string, HTMLAudioElement>());
   const voiceDisconnectingRef = useRef(false);
+  const autoLaunchSyncReadyRef = useRef(false);
   const settingsSyncReadyRef = useRef(false);
   const settingsSyncTimerRef = useRef<number | null>(null);
 
@@ -1829,6 +1830,14 @@ export default function App() {
 
   useEffect(() => {
     window.electronAPI?.getVersion().then(setAppVersion).catch(() => setAppVersion("dev"));
+    window.electronAPI?.getAutoLaunch()
+      .then((enabled) => {
+        autoLaunchSyncReadyRef.current = true;
+        setSettings((current) => (current.autoLaunch === enabled ? current : { ...current, autoLaunch: enabled }));
+      })
+      .catch(() => {
+        autoLaunchSyncReadyRef.current = true;
+      });
 
     const savedToken = localStorage.getItem(TOKEN_KEY);
     if (!savedToken) {
@@ -1842,6 +1851,18 @@ export default function App() {
   useEffect(() => {
     window.electronAPI?.setMinimizeOnClose(settings.minimizeOnClose).catch(() => undefined);
   }, [settings.minimizeOnClose]);
+
+  useEffect(() => {
+    if (!autoLaunchSyncReadyRef.current) {
+      return;
+    }
+
+    window.electronAPI?.setAutoLaunch(settings.autoLaunch)
+      .then((enabled) => {
+        setSettings((current) => (current.autoLaunch === enabled ? current : { ...current, autoLaunch: enabled }));
+      })
+      .catch(() => undefined);
+  }, [settings.autoLaunch]);
 
   useEffect(() => {
     try {
@@ -4983,40 +5004,6 @@ export default function App() {
                         >
                           <span className="settings-toggle-knob" />
                         </button>
-                      </div>
-                    </section>
-
-                    <section className="settings-card settings-toggle-list">
-                      <div className="settings-toggle-row">
-                        <div>
-                          <strong>缓存保留天数</strong>
-                          <span>超过设定天数的本地缓存会在清理时移除。</span>
-                        </div>
-                        <div className="settings-inline-row-control">
-                          <input
-                            id="settings-cleanup-days"
-                            className="settings-inline-input"
-                            type="number"
-                            min="1"
-                            max="365"
-                            value={settings.cleanupDays}
-                            onChange={(event) =>
-                              setSettings((current) => ({
-                                ...current,
-                                cleanupDays: Math.max(1, Number(event.target.value) || 1),
-                              }))
-                            }
-                          />
-                          <span className="settings-inline-suffix">天</span>
-                        </div>
-                      </div>
-
-                      <div className="settings-toggle-row">
-                        <div>
-                          <strong>当前模式</strong>
-                          <span>当前界面以真实后端接口返回为准。</span>
-                        </div>
-                        <strong className="settings-row-value">{token ? "在线模式" : "未登录"}</strong>
                       </div>
                     </section>
                   </>
