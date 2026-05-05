@@ -1,5 +1,6 @@
 ﻿const { app, BrowserWindow, Menu, Tray, ipcMain } = require("electron");
 const path = require("node:path");
+const { dialog } = require("electron");
 
 const devServerUrl = process.env.EKKO_RENDERER_URL;
 const assetsDir = path.join(__dirname, "..", "public", "assets");
@@ -182,6 +183,19 @@ app.whenReady().then(() => {
   ipcMain.handle("app:set-auto-launch", (_event, enabled) => {
     app.setLoginItemSettings(getAutoLaunchOptions(enabled));
     return getAutoLaunchEnabled();
+  });
+  ipcMain.handle("app:select-download-path", async (_event, currentPath) => {
+    const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+      title: "选择下载路径",
+      defaultPath: typeof currentPath === "string" && currentPath ? currentPath : app.getPath("downloads"),
+      properties: ["openDirectory", "createDirectory"],
+    });
+
+    if (result.canceled || !result.filePaths[0]) {
+      return null;
+    }
+
+    return result.filePaths[0];
   });
   ipcMain.handle("app:set-view", (_event, view) => {
     applyViewBounds(view);

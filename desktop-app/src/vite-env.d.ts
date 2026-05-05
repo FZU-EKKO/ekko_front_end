@@ -6,6 +6,7 @@ interface ElectronAPI {
   getVersion: () => Promise<string>;
   getAutoLaunch: () => Promise<boolean>;
   setAutoLaunch: (enabled: boolean) => Promise<boolean>;
+  selectDownloadPath: (currentPath?: string) => Promise<string | null>;
   setView: (view: DesktopView) => Promise<boolean>;
   setMinimizeOnClose: (enabled: boolean) => Promise<boolean>;
   minimizeWindow: () => Promise<boolean>;

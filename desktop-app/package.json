@@ -1,5 +1,5 @@
 {
-  "name": "EKKO",
+  "name": "ekko-desktop",
   "private": true,
   "version": "0.1.1",
   "description": "Desktop frontend shell for EKKO voice chat.",

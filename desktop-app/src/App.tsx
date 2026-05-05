@@ -117,6 +117,7 @@ type SettingsState = {
   monitorMix: number;
   inputDevice: string;
   outputDevice: string;
+  downloadPath: string;
   autoLaunch: boolean;
   minimizeOnClose: boolean;
 };
@@ -239,6 +240,7 @@ const defaultSettings: SettingsState = {
   monitorMix: 24,
   inputDevice: "default",
   outputDevice: "default",
+  downloadPath: "",
   autoLaunch: true,
   minimizeOnClose: true,
 };
@@ -261,6 +263,7 @@ function loadStoredSettings(): SettingsState {
       cleanupDays: Math.max(1, Number(parsed.cleanupDays ?? defaultSettings.cleanupDays) || defaultSettings.cleanupDays),
       micLevel: Math.max(0, Math.min(100, Number(parsed.micLevel ?? defaultSettings.micLevel) || defaultSettings.micLevel)),
       monitorMix: Math.max(0, Math.min(100, Number(parsed.monitorMix ?? defaultSettings.monitorMix) || defaultSettings.monitorMix)),
+      downloadPath: typeof parsed.downloadPath === "string" ? parsed.downloadPath : defaultSettings.downloadPath,
     };
   } catch {
     return defaultSettings;
@@ -279,6 +282,7 @@ function normalizeSettings(value: unknown): SettingsState {
     monitorMix: Math.max(0, Math.min(100, Number(parsed.monitorMix ?? defaultSettings.monitorMix) || defaultSettings.monitorMix)),
     inputDevice: typeof parsed.inputDevice === "string" ? parsed.inputDevice : defaultSettings.inputDevice,
     outputDevice: typeof parsed.outputDevice === "string" ? parsed.outputDevice : defaultSettings.outputDevice,
+    downloadPath: typeof parsed.downloadPath === "string" ? parsed.downloadPath : defaultSettings.downloadPath,
     autoLaunch: parsed.autoLaunch ?? defaultSettings.autoLaunch,
     minimizeOnClose: parsed.minimizeOnClose ?? defaultSettings.minimizeOnClose,
   };
@@ -1905,6 +1909,19 @@ export default function App() {
     window.electronAPI?.setView(currentView).catch(() => undefined);
   }, [currentView]);
 
+  async function handleSelectDownloadPath() {
+    try {
+      const selectedPath = await window.electronAPI?.selectDownloadPath(settings.downloadPath);
+      if (!selectedPath) {
+        return;
+      }
+
+      setSettings((current) => ({ ...current, downloadPath: selectedPath }));
+    } catch {
+      // Keep the existing path if the native picker cannot be opened.
+    }
+  }
+
   useEffect(() => {
     if (!selectedDomainId || Object.prototype.hasOwnProperty.call(channelsByDomain, selectedDomainId) || !token) {
       return;
@@ -1982,9 +1999,9 @@ export default function App() {
   const conversationChannel = joinedChannel ?? selectedChannel;
   const connected = Boolean(activeVoiceChannel);
   const domainMembers = useMemo(() => {
-    const owner = selectedDomainMembers.filter((member) => member.role === "owner").map((member) => member.domainNickname);
-    const admins = selectedDomainMembers.filter((member) => member.role === "admin").map((member) => member.domainNickname);
-    const members = selectedDomainMembers.filter((member) => member.role === "member").map((member) => member.domainNickname);
+    const owner = selectedDomainMembers.filter((member) => member.role === "owner");
+    const admins = selectedDomainMembers.filter((member) => member.role === "admin");
+    const members = selectedDomainMembers.filter((member) => member.role === "member");
 
     return {
       owner,
@@ -4979,7 +4996,7 @@ export default function App() {
                       <div className="settings-toggle-row">
                         <div>
                           <strong>开机自启动</strong>
-                          <span>系统启动后自动拉起 EKKO 桌面端。</span>
+                          <span>开机后自动启动 EKKO 桌面端。</span>
                         </div>
                         <button
                           className={`settings-toggle ${settings.autoLaunch ? "on" : ""}`}
@@ -5005,6 +5022,22 @@ export default function App() {
                           <span className="settings-toggle-knob" />
                         </button>
                       </div>
+
+                      <div className="settings-toggle-row">
+                        <div>
+                          <strong>选择下载路径</strong>
+                          <span>下载音频的默认保存位置。</span>
+                        </div>
+                        <div className="settings-path-control">
+                          <strong className="settings-row-value" title={settings.downloadPath || "系统默认下载目录"}>
+                            {settings.downloadPath || "系统默认下载目录"}
+                          </strong>
+                          <button className="ghost-button compact-button" type="button" onClick={handleSelectDownloadPath}>
+                            选择
+                          </button>
+                        </div>
+                      </div>
+
                     </section>
                   </>
                 ) : null}
@@ -5301,28 +5334,34 @@ export default function App() {
               <ScrollArea className="members-scroll" viewportClassName="members-list">
                 <section className="member-role-group">
                   <h3>{"\u57df\u4e3b"}</h3>
-                  {domainMembers.owner.map((name) => (
-                    <div key={`owner-${name}`} className="member-directory-row">
-                      <span className="member-directory-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>
-                      <span className="member-directory-name" title={name}>{name}</span>
+                  {domainMembers.owner.map((member) => (
+                    <div key={`owner-${member.id}`} className="member-directory-row">
+                      <span className={`member-directory-avatar ${member.avatar ? "has-image" : ""}`.trim()} aria-hidden="true">
+                        {member.avatar ? <img src={resolveMediaUrl(member.avatar) ?? ""} alt="" /> : member.domainNickname.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span className="member-directory-name" title={member.domainNickname}>{member.domainNickname}</span>
                     </div>
                   ))}
                 </section>
                 <section className="member-role-group">
                   <h3>{"\u7ba1\u7406\u5458"}</h3>
-                  {domainMembers.admins.map((name) => (
-                    <div key={`admin-${name}`} className="member-directory-row">
-                      <span className="member-directory-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>
-                      <span className="member-directory-name" title={name}>{name}</span>
+                  {domainMembers.admins.map((member) => (
+                    <div key={`admin-${member.id}`} className="member-directory-row">
+                      <span className={`member-directory-avatar ${member.avatar ? "has-image" : ""}`.trim()} aria-hidden="true">
+                        {member.avatar ? <img src={resolveMediaUrl(member.avatar) ?? ""} alt="" /> : member.domainNickname.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span className="member-directory-name" title={member.domainNickname}>{member.domainNickname}</span>
                     </div>
                   ))}
                 </section>
                 <section className="member-role-group">
                   <h3>{"\u6210\u5458"}</h3>
-                  {domainMembers.members.map((name) => (
-                    <div key={`member-${name}`} className="member-directory-row">
-                      <span className="member-directory-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>
-                      <span className="member-directory-name" title={name}>{name}</span>
+                  {domainMembers.members.map((member) => (
+                    <div key={`member-${member.id}`} className="member-directory-row">
+                      <span className={`member-directory-avatar ${member.avatar ? "has-image" : ""}`.trim()} aria-hidden="true">
+                        {member.avatar ? <img src={resolveMediaUrl(member.avatar) ?? ""} alt="" /> : member.domainNickname.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span className="member-directory-name" title={member.domainNickname}>{member.domainNickname}</span>
                     </div>
                   ))}
                 </section>
