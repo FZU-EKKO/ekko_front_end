@@ -73,4 +73,45 @@ export interface VoiceParticipant {
   isSelf: boolean;
   isMuted: boolean;
   audioEnabled: boolean;
+  isSpeaking: boolean;
+}
+
+export interface VoiceMessageUserInfo {
+  id: string;
+  nick_name: string;
+  avatar: string | null;
+}
+
+export interface VoiceMessage {
+  id: number;
+  channel_id: number;
+  user_id: string;
+  client_message_id?: string | null;
+  audio_path: string;
+  audio_duration_ms: number;
+  audio_format: string;
+  mime_type?: string | null;
+  file_size: number;
+  transcript_text?: string | null;
+  waveform?: number[] | null;
+  avg_amplitude?: number | null;
+  avg_frequency?: number | null;
+  is_excited: boolean;
+  created_at: string;
+  updated_at: string;
+  user: VoiceMessageUserInfo;
+}
+
+export interface VoiceMessagePage {
+  total: number;
+  voice_messages: VoiceMessage[];
+}
+
+export interface ChannelAnalysisResponse {
+  report: string;
+  prompt: string;
+  source_count: number;
+  truncated: boolean;
+  start_time?: string | null;
+  end_time?: string | null;
 }

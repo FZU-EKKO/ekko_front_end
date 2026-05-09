@@ -26,8 +26,8 @@ export default defineConfig({
             return "livekit";
           }
 
-          if (id.includes("react-dom") || id.includes("react")) {
-            return "react-vendor";
+          if (id.includes("hark")) {
+            return "vad";
           }
 
           return "vendor";

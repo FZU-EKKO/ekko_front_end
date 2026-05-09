@@ -1,8 +1,22 @@
 ﻿import { CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AuthResponse, Channel, Domain, DomainMemberInfo, UserInfo, UserSettingsResponse, VoiceConnectionState, VoiceJoinResponse, VoiceParticipant } from "./types";
+import {
+  AuthResponse,
+  Channel,
+  ChannelAnalysisResponse,
+  Domain,
+  DomainMemberInfo,
+  UserInfo,
+  UserSettingsResponse,
+  VoiceConnectionState,
+  VoiceJoinResponse,
+  VoiceMessage,
+  VoiceMessagePage,
+  VoiceParticipant,
+} from "./types";
 import { createPortal } from "react-dom";
 import type { ChangeEvent } from "react";
 import { RoomEvent, Track, type LocalAudioTrack, type RemoteAudioTrack, type RemoteParticipant, type Room } from "livekit-client";
+import hark from "hark";
 import {
   attachRemoteAudioTrack,
   buildMicrophoneCaptureOptions,
@@ -25,8 +39,8 @@ const API_ORIGIN = (() => {
 })();
 const ENABLE_VOICE_JOIN_MOCK = (import.meta.env.VITE_ENABLE_VOICE_JOIN_MOCK ?? "false") === "true";
 const TEMP_VOICE_DEBUG_UI = false;
-const CHAT_UI_AVAILABLE = false;
-const AI_SUMMARY_AVAILABLE = false;
+const CHAT_UI_AVAILABLE = true;
+const AI_SUMMARY_AVAILABLE = true;
 const TOKEN_KEY = "ekko.desktop.token";
 const SETTINGS_KEY = "ekko.desktop.settings";
 const ASSET_BASE = import.meta.env.BASE_URL;
@@ -102,6 +116,10 @@ type CreateChannelFormState = {
 type DomainInfoDraftState = {
   name: string;
   avatar: string | null;
+};
+type AnalysisRangeFormState = {
+  startTime: string;
+  endTime: string;
 };
 type ChannelContextMenuState = {
   channelId: number;
@@ -230,6 +248,240 @@ function resolveMediaUrl(value: string | null | undefined) {
   }
 
   return value;
+}
+
+function formatVoiceMessageTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "--:--";
+  }
+
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatDateTimeInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function formatAnalysisRangeLabel(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function encodePcm16Wav(samples: Float32Array, sampleRate: number) {
+  const bytesPerSample = 2;
+  const dataLength = samples.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+
+  const writeAscii = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, "data");
+  view.setUint32(40, dataLength, true);
+
+  let offset = 44;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index]));
+    const pcmValue = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    view.setInt16(offset, Math.round(pcmValue), true);
+    offset += bytesPerSample;
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function resampleFloat32ToSampleRate(samples: Float32Array, sourceSampleRate: number, targetSampleRate: number) {
+  if (!samples.length || sourceSampleRate === targetSampleRate) {
+    return samples;
+  }
+  const ratio = sourceSampleRate / targetSampleRate;
+  const targetLength = Math.max(1, Math.round(samples.length / ratio));
+  const result = new Float32Array(targetLength);
+  for (let index = 0; index < targetLength; index += 1) {
+    const sourcePosition = index * ratio;
+    const leftIndex = Math.floor(sourcePosition);
+    const rightIndex = Math.min(samples.length - 1, leftIndex + 1);
+    const mix = sourcePosition - leftIndex;
+    result[index] = samples[leftIndex] * (1 - mix) + samples[rightIndex] * mix;
+  }
+  return result;
+}
+
+function computeRms(samples: Float32Array) {
+  if (!samples.length) {
+    return 0;
+  }
+  let energy = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    energy += samples[index] * samples[index];
+  }
+  return Math.sqrt(energy / samples.length);
+}
+
+function buildWaveform(samples: Float32Array, bucketCount = 48) {
+  if (!samples.length) {
+    return [];
+  }
+
+  const bucketSize = Math.max(1, Math.floor(samples.length / bucketCount));
+  const waveform: number[] = [];
+
+  for (let start = 0; start < samples.length && waveform.length < bucketCount; start += bucketSize) {
+    let peak = 0;
+    const end = Math.min(samples.length, start + bucketSize);
+    for (let index = start; index < end; index += 1) {
+      peak = Math.max(peak, Math.abs(samples[index]));
+    }
+    waveform.push(Math.max(0, Math.min(100, Math.round(peak * 100))));
+  }
+
+  return waveform;
+}
+
+function areVoiceMessagesEquivalent(left: VoiceMessage[], right: VoiceMessage[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    const prev = left[index];
+    const next = right[index];
+    if (
+      prev.id !== next.id ||
+      prev.updated_at !== next.updated_at ||
+      prev.audio_path !== next.audio_path ||
+      prev.audio_duration_ms !== next.audio_duration_ms ||
+      prev.transcript_text !== next.transcript_text ||
+      prev.is_excited !== next.is_excited
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function mergeVoiceMessages(current: VoiceMessage[], incoming: VoiceMessage[]) {
+  if (!current.length) {
+    return incoming;
+  }
+  if (!incoming.length) {
+    return current;
+  }
+
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  let changed = false;
+
+  for (const nextItem of incoming) {
+    const prevItem = currentById.get(nextItem.id);
+    if (!prevItem) {
+      currentById.set(nextItem.id, nextItem);
+      changed = true;
+      continue;
+    }
+    if (
+      prevItem.updated_at !== nextItem.updated_at ||
+      prevItem.audio_path !== nextItem.audio_path ||
+      prevItem.audio_duration_ms !== nextItem.audio_duration_ms ||
+      prevItem.transcript_text !== nextItem.transcript_text ||
+      prevItem.is_excited !== nextItem.is_excited
+    ) {
+      currentById.set(nextItem.id, nextItem);
+      changed = true;
+    }
+  }
+
+  if (!changed && current.length === incoming.length) {
+    return current;
+  }
+
+  return [...currentById.values()].sort(
+    (left, right) =>
+      new Date(left.created_at).getTime() - new Date(right.created_at).getTime() ||
+      left.id - right.id,
+  );
+}
+
+function isViewportNearBottom(viewport: HTMLDivElement, threshold = 32) {
+  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= threshold;
+}
+
+function countVoiceMessageDiffs(current: VoiceMessage[], incoming: VoiceMessage[]) {
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  let diffCount = 0;
+
+  for (const nextItem of incoming) {
+    const prevItem = currentById.get(nextItem.id);
+    if (!prevItem || prevItem.updated_at !== nextItem.updated_at || prevItem.transcript_text !== nextItem.transcript_text) {
+      diffCount += 1;
+    }
+  }
+
+  return diffCount;
+}
+
+function areChannelsEquivalent(left: Channel[], right: Channel[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    const prev = left[index];
+    const next = right[index];
+    if (
+      prev.id !== next.id ||
+      prev.domain_id !== next.domain_id ||
+      prev.channel_name !== next.channel_name ||
+      prev.description !== next.description ||
+      prev.create_id !== next.create_id ||
+      prev.max_capacity !== next.max_capacity ||
+      prev.current_voice_count !== next.current_voice_count ||
+      prev.channel_type !== next.channel_type ||
+      prev.sort_order !== next.sort_order ||
+      prev.updated_at !== next.updated_at
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 const defaultSettings: SettingsState = {
@@ -590,10 +842,11 @@ function HoverTextControl({
 type ScrollAreaProps = {
   className?: string;
   viewportClassName?: string;
+  viewportRef?: { current: HTMLDivElement | null };
   children: ReactNode;
 };
 
-function ScrollArea({ className = "", viewportClassName = "", children }: ScrollAreaProps) {
+function ScrollArea({ className = "", viewportClassName = "", viewportRef: externalViewportRef, children }: ScrollAreaProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{ startY: number; startScrollTop: number } | null>(null);
@@ -730,7 +983,15 @@ function ScrollArea({ className = "", viewportClassName = "", children }: Scroll
 
   return (
     <div className={`scroll-area ${className}`.trim()}>
-      <div ref={viewportRef} className="scroll-area-viewport">
+      <div
+        ref={(node) => {
+          viewportRef.current = node;
+          if (externalViewportRef) {
+            externalViewportRef.current = node;
+          }
+        }}
+        className="scroll-area-viewport"
+      >
         <div ref={contentRef} className={viewportClassName}>
           {children}
         </div>
@@ -787,6 +1048,10 @@ const defaultCreateChannelForm: CreateChannelFormState = {
 const defaultDomainInfoDraft: DomainInfoDraftState = {
   name: "",
   avatar: null,
+};
+const defaultAnalysisRangeForm: AnalysisRangeFormState = {
+  startTime: "",
+  endTime: "",
 };
 
 function ProfileAvatar({
@@ -938,6 +1203,35 @@ async function request<T>(path: string, init?: RequestInit, token?: string): Pro
   return body as T;
 }
 
+async function fetchVoiceMessages(channelId: number, token: string) {
+  return request<VoiceMessagePage>(`/voice-messages/channel/${channelId}`, undefined, token);
+}
+
+async function transcribeVoiceMessage(voiceMessageId: number, token: string) {
+  return request<VoiceMessage>(`/voice-messages/${voiceMessageId}/transcribe`, { method: "POST" }, token);
+}
+
+async function analyzeChannelWithRange(
+  channelId: number,
+  prompt: string,
+  startTime: string | null,
+  endTime: string | null,
+  token: string,
+) {
+  return request<ChannelAnalysisResponse>(
+    `/channels/${channelId}/analyze`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        prompt,
+        start_time: startTime,
+        end_time: endTime,
+      }),
+    },
+    token,
+  );
+}
+
 async function uploadAvatarAsset(dataUrl: string, scope: "user" | "domain", token: string) {
   const file = await dataUrlToFile(dataUrl, `${scope}-avatar.png`);
   const formData = new FormData();
@@ -954,6 +1248,68 @@ async function uploadAvatarAsset(dataUrl: string, scope: "user" | "domain", toke
   );
 
   return response.path;
+}
+
+async function uploadVoiceMessageAsset(
+  params: {
+    channelId: number;
+    durationMs: number;
+    wavBlob: Blob;
+    clientMessageId: string;
+    waveform?: number[];
+  },
+  token: string,
+) {
+  const formData = new FormData();
+  formData.set("channel_id", String(params.channelId));
+  formData.set("duration_ms", String(params.durationMs));
+  formData.set("client_message_id", params.clientMessageId);
+  if (params.waveform?.length) {
+    formData.set("waveform", JSON.stringify(params.waveform));
+  }
+  formData.set("file", new File([params.wavBlob], `${params.clientMessageId}.wav`, { type: "audio/wav" }));
+
+  return request<VoiceMessage | null>(
+    "/voice-messages/upload",
+    {
+      method: "POST",
+      body: formData,
+    },
+    token,
+  );
+}
+
+async function uploadVoiceStreamChunkAsset(
+  params: {
+    channelId: number;
+    streamId: string;
+    sequence: number;
+    wavBlob: Blob;
+    isFinal: boolean;
+  },
+  token: string,
+) {
+  const formData = new FormData();
+  formData.set("channel_id", String(params.channelId));
+  formData.set("stream_id", params.streamId);
+  formData.set("sequence", String(params.sequence));
+  formData.set("is_final", String(params.isFinal));
+  formData.set("file", new File([params.wavBlob], `${params.streamId}-${params.sequence}.wav`, { type: "audio/wav" }));
+
+  return request<{
+    stream_id: string;
+    emitted_count: number;
+    voice_messages: VoiceMessage[];
+    session_active: boolean;
+    buffered_ms: number;
+  }>(
+    "/voice-messages/stream/chunk",
+    {
+      method: "POST",
+      body: formData,
+    },
+    token,
+  );
 }
 
 function formatApiError(error: unknown, fallback: string) {
@@ -1815,6 +2171,18 @@ export default function App() {
   const [voiceError, setVoiceError] = useState("");
   const [localParticipantIdentity, setLocalParticipantIdentity] = useState<string | null>(null);
   const [voiceParticipants, setVoiceParticipants] = useState<VoiceParticipant[]>([]);
+  const [voiceMessages, setVoiceMessages] = useState<VoiceMessage[]>([]);
+  const [voiceMessagesLoading, setVoiceMessagesLoading] = useState(false);
+  const [playingVoiceMessageId, setPlayingVoiceMessageId] = useState<number | null>(null);
+  const [pendingVoiceMessageCount, setPendingVoiceMessageCount] = useState(0);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState<ChannelAnalysisResponse | null>(null);
+  const [analysisRangeModalOpen, setAnalysisRangeModalOpen] = useState(false);
+  const [analysisRangeForm, setAnalysisRangeForm] = useState<AnalysisRangeFormState>(defaultAnalysisRangeForm);
+  const [analysisRangeError, setAnalysisRangeError] = useState("");
+  const [joinDebugStatus, setJoinDebugStatus] = useState("Join idle");
+  const [vadDebugStatus, setVadDebugStatus] = useState("VAD idle");
+  const [localInputLevel, setLocalInputLevel] = useState(0);
   const [tempMicPermissionState, setTempMicPermissionState] = useState<TempMicPermissionState>("idle");
   const [tempMicProbeState, setTempMicProbeState] = useState<TempMicProbeState>("idle");
   const [tempMicProbeDetail, setTempMicProbeDetail] = useState("");
@@ -1825,6 +2193,18 @@ export default function App() {
   const localMicrophoneTrackRef = useRef<LocalAudioTrack | null>(null);
   const temporaryMicrophoneTrackRef = useRef(false);
   const remoteAudioElementsRef = useRef(new Map<string, HTMLAudioElement>());
+  const voiceMessagePlayerRef = useRef<HTMLAudioElement | null>(null);
+  const voiceMessagesViewportRef = useRef<HTMLDivElement | null>(null);
+  const pendingTranscriptionIdsRef = useRef<Set<number>>(new Set());
+  const latestVoiceMessagesRef = useRef<VoiceMessage[]>([]);
+  const deferredVoiceMessagesRef = useRef<VoiceMessage[] | null>(null);
+  const sentenceRecorderRef = useRef<{
+    stop: () => Promise<void>;
+  } | null>(null);
+  const uploadSentenceQueueRef = useRef(Promise.resolve());
+  const tokenRef = useRef<string | null>(null);
+  const joinedChannelIdRef = useRef<number | null>(null);
+  const selfMicMutedRef = useRef(false);
   const voiceDisconnectingRef = useRef(false);
   const autoLaunchSyncReadyRef = useRef(false);
   const settingsSyncReadyRef = useRef(false);
@@ -1855,6 +2235,18 @@ export default function App() {
   useEffect(() => {
     window.electronAPI?.setMinimizeOnClose(settings.minimizeOnClose).catch(() => undefined);
   }, [settings.minimizeOnClose]);
+
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+
+  useEffect(() => {
+    joinedChannelIdRef.current = joinedChannelId;
+  }, [joinedChannelId]);
+
+  useEffect(() => {
+    selfMicMutedRef.current = selfMicMuted;
+  }, [selfMicMuted]);
 
   useEffect(() => {
     if (!autoLaunchSyncReadyRef.current) {
@@ -1909,6 +2301,21 @@ export default function App() {
     window.electronAPI?.setView(currentView).catch(() => undefined);
   }, [currentView]);
 
+  useEffect(
+    () => () => {
+      const player = voiceMessagePlayerRef.current;
+      if (player) {
+        player.pause();
+        voiceMessagePlayerRef.current = null;
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    latestVoiceMessagesRef.current = voiceMessages;
+  }, [voiceMessages]);
+
   async function handleSelectDownloadPath() {
     try {
       const selectedPath = await window.electronAPI?.selectDownloadPath(settings.downloadPath);
@@ -1919,6 +2326,350 @@ export default function App() {
       setSettings((current) => ({ ...current, downloadPath: selectedPath }));
     } catch {
       // Keep the existing path if the native picker cannot be opened.
+    }
+  }
+
+  async function triggerVoiceMessageTranscription(voiceMessageId: number, accessToken: string) {
+    if (pendingTranscriptionIdsRef.current.has(voiceMessageId)) {
+      return;
+    }
+
+    pendingTranscriptionIdsRef.current.add(voiceMessageId);
+    try {
+      const updated = await transcribeVoiceMessage(voiceMessageId, accessToken);
+      setVoiceMessages((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    } catch {
+      // Keep silent here. Upload route already attempts ASR automatically.
+    } finally {
+      pendingTranscriptionIdsRef.current.delete(voiceMessageId);
+    }
+  }
+
+  function applyDeferredVoiceMessages() {
+    const deferred = deferredVoiceMessagesRef.current;
+    if (!deferred) {
+      return;
+    }
+
+    deferredVoiceMessagesRef.current = null;
+    setPendingVoiceMessageCount(0);
+    setVoiceMessages((current) => mergeVoiceMessages(current, deferred));
+  }
+
+  async function loadVoiceMessagesForChannel(channelId: number, accessToken: string, silent = false) {
+    if (!silent) {
+      setVoiceMessagesLoading(true);
+    }
+
+    try {
+      const page = await fetchVoiceMessages(channelId, accessToken);
+      const nextMessages = page.voice_messages ?? [];
+      const viewport = voiceMessagesViewportRef.current;
+      const shouldApplyUpdate = !silent || !viewport || isViewportNearBottom(viewport);
+      if (shouldApplyUpdate) {
+        deferredVoiceMessagesRef.current = null;
+        setPendingVoiceMessageCount(0);
+        setVoiceMessages((current) => mergeVoiceMessages(current, nextMessages));
+      } else {
+        const diffCount = countVoiceMessageDiffs(latestVoiceMessagesRef.current, nextMessages);
+        if (diffCount > 0) {
+          deferredVoiceMessagesRef.current = nextMessages;
+          setPendingVoiceMessageCount(diffCount);
+        }
+      }
+
+      const pendingMessage = nextMessages.find((item) => !item.transcript_text?.trim());
+      if (pendingMessage) {
+        void triggerVoiceMessageTranscription(pendingMessage.id, accessToken);
+      }
+    } catch (error) {
+      if (!silent) {
+        setMessage(formatApiError(error, "语音消息加载失败，请稍后重试。"));
+      }
+    } finally {
+      if (!silent) {
+        setVoiceMessagesLoading(false);
+      }
+    }
+  }
+
+  async function handlePlayVoiceMessage(item: VoiceMessage) {
+    const src = resolveMediaUrl(item.audio_path) ?? item.audio_path;
+    if (!src) {
+      setMessage("当前语音文件地址无效。");
+      return;
+    }
+
+    const currentPlayer = voiceMessagePlayerRef.current;
+    if (currentPlayer && playingVoiceMessageId === item.id && !currentPlayer.paused) {
+      currentPlayer.pause();
+      currentPlayer.currentTime = 0;
+      setPlayingVoiceMessageId(null);
+      return;
+    }
+
+    if (currentPlayer) {
+      currentPlayer.pause();
+      currentPlayer.currentTime = 0;
+    }
+
+    const player = new Audio(src);
+    voiceMessagePlayerRef.current = player;
+    player.onended = () => setPlayingVoiceMessageId((current) => (current === item.id ? null : current));
+    player.onerror = () => {
+      setPlayingVoiceMessageId(null);
+      setMessage("语音播放失败。");
+    };
+
+    try {
+      await player.play();
+      setPlayingVoiceMessageId(item.id);
+    } catch (error) {
+      setPlayingVoiceMessageId(null);
+      setMessage(formatApiError(error, "语音播放失败。"));
+    }
+  }
+
+  function stopSentenceRecorder() {
+    void sentenceRecorderRef.current?.stop();
+    sentenceRecorderRef.current = null;
+    setLocalInputLevel(0);
+  }
+
+  function queueSentenceUpload(samples: Float32Array, sampleRate: number) {
+    const activeToken = tokenRef.current;
+    const activeChannelId = joinedChannelIdRef.current;
+    const minSentenceSamples = Math.floor(sampleRate * 0.5);
+    if (!activeToken || !activeChannelId) {
+      setVadDebugStatus(
+        `VAD upload blocked: token=${Boolean(activeToken)} channel=${Boolean(activeChannelId)} samples=${samples.length}`,
+      );
+      return;
+    }
+    if (samples.length < minSentenceSamples) {
+      setVadDebugStatus(`VAD sentence dropped: too short (${Math.round((samples.length / sampleRate) * 1000)}ms)`);
+      return;
+    }
+
+    const wavBlob = encodePcm16Wav(samples, sampleRate);
+    const waveform = buildWaveform(samples);
+    const durationMs = Math.max(1, Math.round((samples.length / sampleRate) * 1000));
+    const clientMessageId = `voice-${activeChannelId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    uploadSentenceQueueRef.current = uploadSentenceQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        setVadDebugStatus(`VAD uploading: channel=${activeChannelId} durationMs=${durationMs}`);
+        const uploaded = await uploadVoiceMessageAsset(
+          {
+            channelId: activeChannelId,
+            durationMs,
+            wavBlob,
+            clientMessageId,
+            waveform,
+          },
+          activeToken,
+        );
+        if (!uploaded) {
+          setVadDebugStatus("VAD upload dropped by audio event");
+          return;
+        }
+
+        const viewport = voiceMessagesViewportRef.current;
+        const shouldApplyUpdate = !viewport || isViewportNearBottom(viewport);
+        if (shouldApplyUpdate) {
+          deferredVoiceMessagesRef.current = null;
+          setPendingVoiceMessageCount(0);
+          setVoiceMessages((current) => mergeVoiceMessages(current, [uploaded]));
+          setVadDebugStatus(`VAD upload success: message=${uploaded.id}`);
+          return;
+        }
+
+        const mergedDeferred = mergeVoiceMessages(deferredVoiceMessagesRef.current ?? latestVoiceMessagesRef.current, [uploaded]);
+        deferredVoiceMessagesRef.current = mergedDeferred;
+        setPendingVoiceMessageCount((current) => current + 1);
+        setVadDebugStatus(`VAD upload success (deferred): message=${uploaded.id}`);
+      })
+      .catch((error) => {
+        setVadDebugStatus(`VAD upload failed: ${formatApiError(error, "unknown error")}`);
+        setMessage(formatApiError(error, "语音分句上传失败，请稍后重试。"));
+      });
+  }
+
+  async function startSentenceRecorder(track: LocalAudioTrack) {
+    stopSentenceRecorder();
+
+    const mediaStreamTrack = track.mediaStreamTrack;
+    if (!mediaStreamTrack) {
+      setVadDebugStatus("VAD missing mediaStreamTrack");
+      return;
+    }
+
+    const clonedTrack = mediaStreamTrack.clone();
+    let stream: MediaStream | null = null;
+    let stopped = false;
+    let audioContext: AudioContext | null = null;
+    let sourceNode: MediaStreamAudioSourceNode | null = null;
+    let processorNode: ScriptProcessorNode | null = null;
+    let speechEvents: ReturnType<typeof hark> | null = null;
+    let processedFrames = 0;
+    let isSpeaking = false;
+    let activeSamples: Float32Array[] = [];
+    let preSpeechSamples: Float32Array[] = [];
+    let finalizeTimerId: number | null = null;
+    const preSpeechFrameLimit = 6;
+    const minChunkRms = 0.01;
+    const sentenceThreshold = -62;
+    setVadDebugStatus("VAD sentence uploader init");
+    const stopAudioStreamTracks = (activeStream: { getTracks: () => MediaStreamTrack[] } | null | undefined) => {
+      activeStream?.getTracks().forEach((activeTrack) => activeTrack.stop());
+    };
+    const mergeBufferedSamples = (chunks: Float32Array[]) => {
+      const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      if (!totalSamples) {
+        return null;
+      }
+      const merged = new Float32Array(totalSamples);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return merged;
+    };
+    const finalizeSentence = () => {
+      if (!isSpeaking && activeSamples.length === 0) {
+        return;
+      }
+      if (finalizeTimerId !== null) {
+        window.clearTimeout(finalizeTimerId);
+        finalizeTimerId = null;
+      }
+      const chunks = activeSamples;
+      activeSamples = [];
+      isSpeaking = false;
+      preSpeechSamples = [];
+      const merged = mergeBufferedSamples(chunks);
+      if (!merged || !audioContext) {
+        setVadDebugStatus("VAD speech end: empty");
+        return;
+      }
+      setVadDebugStatus(`VAD speech end: samples=${merged.length}`);
+      queueSentenceUpload(merged, audioContext.sampleRate);
+    };
+
+    try {
+      if (!stream) {
+        stream = new MediaStream([clonedTrack]);
+      }
+      audioContext = new AudioContext();
+      setVadDebugStatus(`VAD audio context: ${audioContext.state}`);
+      if (audioContext.state !== "running") {
+        await audioContext.resume();
+        setVadDebugStatus(`VAD audio context resumed: ${audioContext.state}`);
+      }
+      sourceNode = audioContext.createMediaStreamSource(stream);
+      processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+      processorNode.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0);
+        if (!input.length || selfMicMutedRef.current) {
+          setLocalInputLevel(0);
+          return;
+        }
+        const rms = computeRms(input);
+        setLocalInputLevel(rms);
+        processedFrames += 1;
+        if (processedFrames === 1 || processedFrames % 20 === 0) {
+          setVadDebugStatus(`VAD frames: ${processedFrames} speaking=${isSpeaking} rms=${rms.toFixed(4)}`);
+        }
+        const chunk = new Float32Array(input);
+        if (rms >= minChunkRms) {
+          preSpeechSamples.push(chunk);
+          if (preSpeechSamples.length > preSpeechFrameLimit) {
+            preSpeechSamples.shift();
+          }
+        }
+        if (isSpeaking) {
+          activeSamples.push(chunk);
+        }
+      };
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioContext.destination);
+      speechEvents = hark(stream, {
+        play: false,
+        audioContext,
+        threshold: sentenceThreshold,
+        interval: 80,
+      });
+      speechEvents.on("speaking", () => {
+        if (stopped || selfMicMutedRef.current) {
+          return;
+        }
+        if (finalizeTimerId !== null) {
+          window.clearTimeout(finalizeTimerId);
+          finalizeTimerId = null;
+        }
+        if (!isSpeaking) {
+          isSpeaking = true;
+          activeSamples = [...preSpeechSamples];
+          setVadDebugStatus(`VAD speech start: prebuffer=${preSpeechSamples.length}`);
+        }
+      });
+      speechEvents.on("stopped_speaking", () => {
+        if (stopped) {
+          return;
+        }
+        if (!isSpeaking) {
+          return;
+        }
+        setVadDebugStatus("VAD stop pending");
+        finalizeTimerId = window.setTimeout(() => finalizeSentence(), 220);
+      });
+      setVadDebugStatus("VAD sentence uploader started");
+
+      if (sentenceRecorderRef.current) {
+        stopped = true;
+        clonedTrack.stop();
+        return;
+      }
+      sentenceRecorderRef.current = {
+        stop: async () => {
+          if (stopped) {
+            return;
+          }
+          stopped = true;
+          setLocalInputLevel(0);
+          if (finalizeTimerId !== null) {
+            window.clearTimeout(finalizeTimerId);
+            finalizeTimerId = null;
+          }
+          finalizeSentence();
+          speechEvents?.stop();
+          processorNode?.disconnect();
+          sourceNode?.disconnect();
+          await audioContext?.close().catch(() => undefined);
+          clonedTrack.stop();
+          stopAudioStreamTracks(stream as { getTracks: () => MediaStreamTrack[] } | null);
+          stream = null;
+        },
+      };
+    } catch (error) {
+      console.error("voice sentence uploader init failed", error);
+      setVadDebugStatus(`VAD init failed: ${formatApiError(error, "unknown error")}`);
+      setLocalInputLevel(0);
+      setVoiceError(formatApiError(error, "语音分句上传初始化失败。"));
+      setMessage(formatApiError(error, "语音分句上传初始化失败。"));
+      if (finalizeTimerId !== null) {
+        window.clearTimeout(finalizeTimerId);
+      }
+      speechEvents?.stop();
+      processorNode?.disconnect();
+      sourceNode?.disconnect();
+      await audioContext?.close().catch(() => undefined);
+      clonedTrack.stop();
+      stopAudioStreamTracks(stream as { getTracks: () => MediaStreamTrack[] } | null);
+      stream = null;
+      throw error;
     }
   }
 
@@ -1997,6 +2748,8 @@ export default function App() {
     [channelsByDomain, joinedChannelId],
   );
   const conversationChannel = joinedChannel ?? selectedChannel;
+  const conversationChannelId = conversationChannel?.id ?? null;
+  const conversationChannelType = conversationChannel?.channel_type ?? null;
   const connected = Boolean(activeVoiceChannel);
   const domainMembers = useMemo(() => {
     const owner = selectedDomainMembers.filter((member) => member.role === "owner");
@@ -2009,7 +2762,76 @@ export default function App() {
       members,
     };
   }, [selectedDomainMembers]);
-  const transcriptLines = useMemo(() => [], []);
+  const voiceMessageNameByUserId = useMemo(
+    () =>
+      selectedDomainMembers.reduce<Record<string, string>>((accumulator, member) => {
+        if (member.userId) {
+          accumulator[member.userId] = member.domainNickname;
+        }
+        return accumulator;
+      }, {}),
+    [selectedDomainMembers],
+  );
+  const displayedVoiceMessages = useMemo(
+    () =>
+      [...voiceMessages].sort(
+        (left, right) =>
+          new Date(left.created_at).getTime() - new Date(right.created_at).getTime() ||
+          left.id - right.id,
+      ),
+    [voiceMessages],
+  );
+  const activeVoiceInputParticipants = useMemo(
+    () => voiceParticipants.filter((participant) => participant.audioEnabled && participant.isSpeaking),
+    [voiceParticipants],
+  );
+  const normalizedLocalInputLevel = Math.max(0, Math.min(1, localInputLevel * 42));
+  const hasActiveVoiceInput = normalizedLocalInputLevel > 0.12 || activeVoiceInputParticipants.length > 0;
+  const voiceInputIndicatorLabel = normalizedLocalInputLevel > 0.06
+    ? `本地输入电平：${Math.round(localInputLevel * 1000)}`
+    : activeVoiceInputParticipants.length > 0
+      ? `输入中：${activeVoiceInputParticipants.map((participant) => participant.displayName).join("、")}`
+      : "当前没有音频输入";
+  useEffect(() => {
+    if (!conversationChannelId || !token || conversationChannelType === "text") {
+      setVoiceMessages([]);
+      setVoiceMessagesLoading(false);
+      setPendingVoiceMessageCount(0);
+      pendingTranscriptionIdsRef.current.clear();
+      deferredVoiceMessagesRef.current = null;
+      return;
+    }
+
+    void loadVoiceMessagesForChannel(conversationChannelId, token);
+  }, [conversationChannelId, conversationChannelType, token]);
+
+  useEffect(() => {
+    if (!conversationChannelId || !token || conversationChannelType === "text") {
+      return;
+    }
+
+    const timerId = window.setInterval(() => {
+      void loadVoiceMessagesForChannel(conversationChannelId, token, true);
+    }, 2500);
+
+    return () => window.clearInterval(timerId);
+  }, [conversationChannelId, conversationChannelType, token]);
+
+  useEffect(() => {
+    const viewport = voiceMessagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const handleScroll = () => {
+      if (deferredVoiceMessagesRef.current && isViewportNearBottom(viewport)) {
+        applyDeferredVoiceMessages();
+      }
+    };
+
+    viewport.addEventListener("scroll", handleScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", handleScroll);
+  }, [conversationChannelId, conversationChannelType]);
   const settingsNavItems = useMemo(
     () => [
       { key: "account" as const, group: "用户设置", label: "账号设置", iconUrl: USER_GLYPH_URL },
@@ -2396,7 +3218,13 @@ export default function App() {
     try {
       const channelPage = await request<{ total: number; channel_infos: Channel[] }>(`/channels/list_by_domain/${domainId}`, undefined, sessionToken);
       const channels = channelPage.channel_infos ?? [];
-      setChannelsByDomain((current) => ({ ...current, [domainId]: channels }));
+      setChannelsByDomain((current) => {
+        const previous = current[domainId] ?? [];
+        if (areChannelsEquivalent(previous, channels)) {
+          return current;
+        }
+        return { ...current, [domainId]: channels };
+      });
     } catch (error) {
       setChannelsByDomain((current) => ({
         ...current,
@@ -2432,6 +3260,7 @@ export default function App() {
       isSelf,
       isMuted: !audioEnabled,
       audioEnabled,
+      isSpeaking: Boolean(participant.isSpeaking && audioEnabled),
     };
   }
 
@@ -2493,6 +3322,7 @@ export default function App() {
   }
 
   async function prepareLocalMicrophoneTrack(room: Room | null) {
+    setJoinDebugStatus(room ? "Prepare mic: begin (room)" : "Prepare mic: begin (local)");
     const existingTrack = localMicrophoneTrackRef.current;
     if (existingTrack) {
       if (room) {
@@ -2504,23 +3334,42 @@ export default function App() {
 
     const captureOptions = getCurrentMicrophoneCaptureOptions();
     try {
+      setJoinDebugStatus("Prepare mic: requesting track");
       setTempMicProbeState("requesting");
       setTempMicProbeDetail("");
       const nextTrack = room
         ? await createPublishedMicrophoneTrack(room, captureOptions)
         : await createMicrophoneTrack(captureOptions);
 
+      setJoinDebugStatus("Prepare mic: track ready");
       await syncLocalMicrophoneMute(nextTrack, selfMicMuted);
       localMicrophoneTrackRef.current = nextTrack;
       temporaryMicrophoneTrackRef.current = !room;
+      if (room) {
+        setJoinDebugStatus("Prepare mic: starting VAD");
+        setVadDebugStatus("VAD starting from microphone");
+        try {
+          await startSentenceRecorder(nextTrack);
+          setVadDebugStatus((current) => (current === "VAD starting from microphone" ? "VAD ready" : current));
+        } catch (error) {
+          const detail = formatApiError(error, "语音分句上传初始化失败。");
+          console.warn("voice sentence recorder init failed", error);
+          setVoiceError(`已加入语音房间，但自动分句上传不可用：${detail}`);
+        }
+      } else {
+        setVadDebugStatus("VAD not started: no voice room");
+        stopSentenceRecorder();
+      }
       setTempMicPermissionState("granted");
       setTempMicProbeState("ready");
       setTempAppliedInputDeviceLabel(selectedInputDeviceLabel);
       setTempAppliedOutputDeviceLabel(selectedOutputDeviceLabel);
       setTempMicProbeDetail(room ? "本地麦克风轨已准备，待 LiveKit 房间发布验证。" : "本地麦克风轨已创建，可用于输入设备联调。");
+      setJoinDebugStatus(room ? "Prepare mic: completed" : "Prepare mic: local-only completed");
       return nextTrack;
     } catch (error) {
       const detail = formatMediaAccessError(error);
+      setJoinDebugStatus(`Prepare mic failed: ${detail}`);
       setTempMicPermissionState(error instanceof Error && error.name === "NotAllowedError" ? "denied" : "unknown");
       setTempMicProbeState("failed");
       setTempMicProbeDetail(detail);
@@ -2535,6 +3384,7 @@ export default function App() {
 
     localMicrophoneTrackRef.current = null;
     temporaryMicrophoneTrackRef.current = false;
+    stopSentenceRecorder();
 
     if (localTrack) {
       await unpublishLocalMicrophoneTrack(room, localTrack);
@@ -2580,6 +3430,7 @@ export default function App() {
     localMicrophoneTrackRef.current?.stop();
     localMicrophoneTrackRef.current = null;
     temporaryMicrophoneTrackRef.current = false;
+    stopSentenceRecorder();
     setTempMicProbeState("idle");
     setTempMicProbeDetail("临时麦克风检测轨道已停止。");
     setMessage("已停止临时麦克风检测。");
@@ -3514,6 +4365,8 @@ export default function App() {
     if (channel.channel_type === "voice") {
       setVoiceError("");
       setVoiceConnectionState("joining");
+      setJoinDebugStatus("Join voice: begin");
+      setVadDebugStatus("VAD idle");
 
       try {
         if (token && joinedChannelId && joinedChannelId !== channel.id) {
@@ -3540,6 +4393,7 @@ export default function App() {
               isSelf: true,
               isMuted: selfMicMuted,
               audioEnabled: !selfMicMuted,
+              isSpeaking: false,
             },
           ]);
           setVoiceConnectionState("connected");
@@ -3555,6 +4409,7 @@ export default function App() {
           throw new Error("语音入会接口返回缺少 serverUrl 或 token。");
         }
 
+        setJoinDebugStatus("Join voice: creating room");
         const room = createVoiceRoom();
         roomRef.current = room;
 
@@ -3586,9 +4441,14 @@ export default function App() {
           })
           .on(RoomEvent.Reconnecting, () => {
             setVoiceConnectionState("reconnecting");
+            setJoinDebugStatus("Join voice: reconnecting");
           })
           .on(RoomEvent.Reconnected, () => {
             setVoiceConnectionState("connected");
+            setJoinDebugStatus("Join voice: reconnected");
+            syncVoiceParticipantsFromRoom(room);
+          })
+          .on(RoomEvent.ActiveSpeakersChanged, () => {
             syncVoiceParticipantsFromRoom(room);
           })
           .on(RoomEvent.Disconnected, () => {
@@ -3601,14 +4461,18 @@ export default function App() {
             }
             setJoinedChannelId(null);
             setMessage("语音连接已断开。");
+            setJoinDebugStatus("Join voice: disconnected");
           });
 
+        setJoinDebugStatus("Join voice: connecting room");
         await room.connect(joinSession.serverUrl, joinSession.token);
+        setJoinDebugStatus("Join voice: room connected");
         await prepareLocalMicrophoneTrack(room);
         setLocalParticipantIdentity(joinSession.participantIdentity || room.localParticipant.identity);
         syncVoiceParticipantsFromRoom(room);
         setVoiceConnectionState("connected");
         setJoinedChannelId(channel.id);
+        setJoinDebugStatus("Join voice: ready");
         if (selectedDomain && token) {
           await loadChannels(selectedDomain.id, token);
         }
@@ -3617,6 +4481,7 @@ export default function App() {
         await clearVoiceSessionState();
         setJoinedChannelId(null);
         setVoiceConnectionState("failed");
+        setJoinDebugStatus(`Join voice failed: ${formatApiError(error, "unknown error")}`);
         setVoiceError(formatApiError(error, "语音频道入会信息获取失败。"));
         setMessage(formatApiError(error, "语音频道入会信息获取失败。"));
       }
@@ -4110,6 +4975,7 @@ export default function App() {
                 ...participant,
                 isMuted: next,
                 audioEnabled: !next,
+                isSpeaking: next ? false : participant.isSpeaking,
               }
             : participant,
         ),
@@ -4158,22 +5024,98 @@ export default function App() {
 
   function handleAskAi(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!CHAT_UI_AVAILABLE) {
-      setMessage("当前版本未接入聊天消息服务。");
-      return;
-    }
-    const prompt = chatDraft.trim();
-    if (!prompt) {
-      setMessage("\u8bf7\u8f93\u5165\u8981\u63d0\u95ee\u7684\u5185\u5bb9\u3002");
-      return;
-    }
-
-    setMessage(`已提交问题：${prompt}`);
-    setChatDraft("");
+    void handleAnalyzeConversation(chatDraft.trim());
   }
 
   function handleSummarizeConversation() {
-    setMessage("当前版本未接入 AI 总结服务。");
+    const now = new Date();
+    const fallbackStart = new Date(now.getTime() - 60 * 60 * 1000);
+    const firstMessageTime = voiceMessages[0]?.created_at ? new Date(voiceMessages[0].created_at) : null;
+    const lastMessageTime = voiceMessages.length ? new Date(voiceMessages[voiceMessages.length - 1].created_at) : null;
+    setAnalysisRangeError("");
+    setAnalysisRangeForm({
+      startTime: formatDateTimeInputValue(
+        firstMessageTime && !Number.isNaN(firstMessageTime.getTime()) ? firstMessageTime : fallbackStart,
+      ),
+      endTime: formatDateTimeInputValue(
+        lastMessageTime && !Number.isNaN(lastMessageTime.getTime()) ? lastMessageTime : now,
+      ),
+    });
+    setAnalysisRangeModalOpen(true);
+  }
+
+  async function handleAnalyzeConversation(prompt: string) {
+    await handleAnalyzeConversationWithRange(prompt, null, null);
+  }
+
+  async function handleAnalyzeConversationWithRange(prompt: string, startTime: string | null, endTime: string | null) {
+    const channelId = conversationChannel?.id;
+    if (!channelId) {
+      setMessage("请先选择一个频道。");
+      return;
+    }
+    if (!token) {
+      setMessage("登录状态已失效，请重新登录。");
+      return;
+    }
+
+    setAnalysisLoading(true);
+    try {
+      const result = await analyzeChannelWithRange(channelId, prompt, startTime, endTime, token);
+      setAnalysisResult(result);
+      setAnalysisRangeModalOpen(false);
+      setAnalysisRangeError("");
+      if (prompt) {
+        setChatDraft("");
+      }
+    } catch (error) {
+      setMessage(formatApiError(error, "频道判定失败，请稍后重试。"));
+    } finally {
+      setAnalysisLoading(false);
+    }
+  }
+
+  function handleCloseAnalysisRangeModal() {
+    if (analysisLoading) {
+      return;
+    }
+    setAnalysisRangeModalOpen(false);
+    setAnalysisRangeError("");
+  }
+
+  function handleSubmitAnalysisRange(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const startTime = analysisRangeForm.startTime.trim();
+    const endTime = analysisRangeForm.endTime.trim();
+
+    if (!startTime || !endTime) {
+      setAnalysisRangeError("请选择完整的开始和结束时间。");
+      return;
+    }
+
+    if (new Date(startTime).getTime() > new Date(endTime).getTime()) {
+      setAnalysisRangeError("开始时间不能晚于结束时间。");
+      return;
+    }
+
+    setAnalysisRangeError("");
+    void handleAnalyzeConversationWithRange("", startTime, endTime);
+  }
+
+  function handleRefreshVoiceMessages() {
+    if (!conversationChannel?.id || !token) {
+      setMessage("请先进入频道。");
+      return;
+    }
+    void loadVoiceMessagesForChannel(conversationChannel.id, token, true);
+  }
+
+  function handleShowLatestVoiceMessages() {
+    applyDeferredVoiceMessages();
+    const viewport = voiceMessagesViewportRef.current;
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
   }
 
   const domainEntryCard = domainEntryCardOpen ? (
@@ -4415,6 +5357,87 @@ export default function App() {
           secondaryLabel="返回域设置"
           emptyLabel="点击上传域头像"
         />
+      </div>
+    </div>
+  ) : null;
+  const analysisModal = analysisResult ? (
+    <div className="settings-modal-layer no-drag" role="presentation" onClick={() => setAnalysisResult(null)}>
+      <div
+        className="settings-modal-card channel-analysis-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="channel-analysis-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="settings-modal-head">
+          <h2 id="channel-analysis-title">频道判定结果</h2>
+          <button className="settings-modal-back" type="button" aria-label="关闭" title="关闭" onClick={() => setAnalysisResult(null)}>
+            <span className="settings-modal-back-icon" style={iconMask(WINDOW_CLOSE_URL)} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="channel-analysis-meta">
+          <span>样本数 {analysisResult.source_count}</span>
+          <span>{analysisResult.truncated ? "已截断历史文本" : "已使用完整采样窗口"}</span>
+          {analysisResult.start_time || analysisResult.end_time ? (
+            <span>
+              时间范围: {formatAnalysisRangeLabel(analysisResult.start_time) ?? "最早"} - {formatAnalysisRangeLabel(analysisResult.end_time) ?? "最新"}
+            </span>
+          ) : (
+            <span>时间范围: 全部可用记录</span>
+          )}
+          {analysisResult.prompt ? <span>提示词: {analysisResult.prompt}</span> : <span>默认判定</span>}
+        </div>
+        <div className="channel-analysis-report">{analysisResult.report}</div>
+      </div>
+    </div>
+  ) : null;
+  const analysisRangeModal = analysisRangeModalOpen ? (
+    <div className="settings-modal-layer no-drag" role="presentation" onClick={handleCloseAnalysisRangeModal}>
+      <div
+        className="settings-modal-card channel-analysis-range-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="channel-analysis-range-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="settings-modal-head channel-create-head">
+          <h2 id="channel-analysis-range-title">选择总结时间范围</h2>
+        </div>
+        <form className="channel-create-form channel-analysis-range-form" onSubmit={handleSubmitAnalysisRange}>
+          <label className="underline-field">
+            <span>开始时间</span>
+            <div className="underline-field-control underline-field-control-single">
+              <input
+                type="datetime-local"
+                value={analysisRangeForm.startTime}
+                onChange={(event) => {
+                  setAnalysisRangeError("");
+                  setAnalysisRangeForm((current) => ({ ...current, startTime: event.target.value }));
+                }}
+                disabled={analysisLoading}
+              />
+            </div>
+          </label>
+          <label className="underline-field">
+            <span>结束时间</span>
+            <div className="underline-field-control underline-field-control-single">
+              <input
+                type="datetime-local"
+                value={analysisRangeForm.endTime}
+                onChange={(event) => {
+                  setAnalysisRangeError("");
+                  setAnalysisRangeForm((current) => ({ ...current, endTime: event.target.value }));
+                }}
+                disabled={analysisLoading}
+              />
+            </div>
+          </label>
+          {analysisRangeError ? <p className="message-line">{analysisRangeError}</p> : null}
+          <div className="underline-action-row">
+            <button className="channel-text-button" type="button" onClick={handleCloseAnalysisRangeModal} disabled={analysisLoading}>取消</button>
+            <button className="channel-text-button" type="submit" disabled={analysisLoading}>{analysisLoading ? "总结中..." : "开始总结"}</button>
+          </div>
+        </form>
       </div>
     </div>
   ) : null;
@@ -5292,23 +6315,86 @@ export default function App() {
 
                 <section className="chat-panel">
                   <div className="chat-panel-head">
-                    <strong className="chat-panel-title">
-                      <span className="chat-panel-title-icon" style={iconMask(PLANE_URL)} aria-hidden="true" />
-                      <span>{"\u804a\u5929\u8bb0\u5f55"}</span>
-                    </strong>
+                    <div className="chat-panel-title-stack">
+                      <strong className="chat-panel-title">
+                        <span className="chat-panel-title-icon" style={iconMask(PLANE_URL)} aria-hidden="true" />
+                        <span>{"语音消息"}</span>
+                        <span
+                          className={`voice-input-indicator ${hasActiveVoiceInput ? "is-active" : ""}`.trim()}
+                          title={voiceInputIndicatorLabel}
+                          aria-label={voiceInputIndicatorLabel}
+                          style={{ "--voice-input-level": normalizedLocalInputLevel.toFixed(3) } as CSSProperties}
+                        >
+                          <span className="voice-input-indicator-bars" aria-hidden="true">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                        </span>
+                      </strong>
+                      <small className="voice-debug-status">{joinDebugStatus}</small>
+                      <small className="voice-debug-status">{vadDebugStatus}</small>
+                    </div>
+                    {pendingVoiceMessageCount ? (
+                      <button
+                        className="ghost-button compact-button"
+                        type="button"
+                        title="显示最新语音消息"
+                        onClick={handleShowLatestVoiceMessages}
+                      >
+                        {pendingVoiceMessageCount} 条新消息
+                      </button>
+                    ) : null}
+                    <button
+                      className="inline-icon-button voice-refresh-button"
+                      type="button"
+                      title="检查新语音消息"
+                      onClick={handleRefreshVoiceMessages}
+                      disabled={voiceMessagesLoading}
+                    >
+                      <span className="inline-icon-glyph" style={iconMask(MAGNIFYING_GLASS_LIGHT_URL)} aria-hidden="true" />
+                    </button>
                   </div>
-                  <ScrollArea className="chat-log-scroll" viewportClassName="chat-log-list">
-                    {transcriptLines.map((line, index) => (
-                      <p key={`${line}-${index}`} className="chat-line">{line}</p>
-                    ))}
+                  <ScrollArea className="chat-log-scroll" viewportClassName="chat-log-list" viewportRef={voiceMessagesViewportRef}>
+                    {voiceMessagesLoading ? (
+                      <div className="empty-state">正在加载语音消息…</div>
+                    ) : displayedVoiceMessages.length ? (
+                      displayedVoiceMessages.map((item) => (
+                        <article key={item.id} className="voice-message-row">
+                          <span className="voice-message-inline">
+                            <strong className="voice-message-inline-name">
+                              {voiceMessageNameByUserId[item.user.id] ?? item.user.nick_name}:
+                            </strong>
+                            <span
+                              className={`voice-message-inline-text ${item.transcript_text ? "" : "is-pending"} ${item.is_excited ? "is-excited" : ""}`.trim()}
+                              title={item.transcript_text || "识别中…"}
+                            >
+                              {item.transcript_text || "识别中…"}
+                            </span>
+                            <span className="voice-message-inline-meta">
+                              ({formatVoiceMessageTime(item.created_at)})
+                            </span>
+                          </span>
+                          <button
+                            className={`voice-message-play-button compact ${playingVoiceMessageId === item.id ? "is-playing" : ""}`.trim()}
+                            type="button"
+                            onClick={() => void handlePlayVoiceMessage(item)}
+                          >
+                            {playingVoiceMessageId === item.id ? "停止" : "播放"}
+                          </button>
+                        </article>
+                      ))
+                    ) : (
+                      <div className="empty-state">当前频道还没有语音消息。</div>
+                    )}
                   </ScrollArea>
                   <form className="chat-input-row" onSubmit={handleAskAi}>
                     <button
-                      className="summary-button chat-icon-button"
+                      className={`summary-button chat-icon-button ${analysisLoading ? "is-busy" : ""}`.trim()}
                       type="button"
-                      title={AI_SUMMARY_AVAILABLE ? "AI 总结" : "AI 总结暂未开放"}
+                      title="直接判定"
                       onClick={handleSummarizeConversation}
-                      disabled={!AI_SUMMARY_AVAILABLE}
+                      disabled={analysisLoading}
                     >
                       <span className="chat-icon-glyph" style={iconMask(AI_SUMMARY_URL)} aria-hidden="true" />
                     </button>
@@ -5316,12 +6402,18 @@ export default function App() {
                       <input
                         type="text"
                         value={chatDraft}
-                        onChange={(event) => setChatDraft(event.target.value)}
-                        placeholder={CHAT_UI_AVAILABLE ? "发送消息" : "聊天消息功能暂未开放"}
-                        disabled={!CHAT_UI_AVAILABLE}
+                        maxLength={120}
+                        onChange={(event) => setChatDraft(event.target.value.slice(0, 120))}
+                        placeholder="输入提示词后判定"
+                        disabled={analysisLoading}
                       />
                     </label>
-                    <button className="chat-submit-button chat-icon-button" type="submit" title="enter" disabled={!CHAT_UI_AVAILABLE}>
+                    <button
+                      className={`chat-submit-button chat-icon-button ${analysisLoading ? "is-busy" : ""}`.trim()}
+                      type="submit"
+                      title="提示词判定"
+                      disabled={analysisLoading}
+                    >
                       <span className="chat-icon-glyph" style={iconMask(ENTER_URL)} aria-hidden="true" />
                     </button>
                   </form>
@@ -5370,6 +6462,8 @@ export default function App() {
           </main>
         </div>
 
+        {analysisRangeModal}
+        {analysisModal}
       </div>
     </SceneFrame>
   );
