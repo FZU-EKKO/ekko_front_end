@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getAutoLaunch: () => ipcRenderer.invoke("app:get-auto-launch"),
   setAutoLaunch: (enabled) => ipcRenderer.invoke("app:set-auto-launch", enabled),
   selectDownloadPath: (currentPath) => ipcRenderer.invoke("app:select-download-path", currentPath),
+  saveVoiceMessage: (payload) => ipcRenderer.invoke("app:save-voice-message", payload),
   setView: (view) => ipcRenderer.invoke("app:set-view", view),
   setMinimizeOnClose: (enabled) => ipcRenderer.invoke("app:set-minimize-on-close", enabled),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),

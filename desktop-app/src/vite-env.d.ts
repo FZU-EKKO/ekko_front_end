@@ -7,6 +7,7 @@ interface ElectronAPI {
   getAutoLaunch: () => Promise<boolean>;
   setAutoLaunch: (enabled: boolean) => Promise<boolean>;
   selectDownloadPath: (currentPath?: string) => Promise<string | null>;
+  saveVoiceMessage: (payload: { directory?: string; fileName: string; data: ArrayBuffer }) => Promise<{ path: string }>;
   setView: (view: DesktopView) => Promise<boolean>;
   setMinimizeOnClose: (enabled: boolean) => Promise<boolean>;
   minimizeWindow: () => Promise<boolean>;

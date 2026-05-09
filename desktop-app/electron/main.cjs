@@ -1,5 +1,6 @@
 ﻿const { app, BrowserWindow, Menu, Tray, ipcMain } = require("electron");
 const path = require("node:path");
+const fs = require("node:fs/promises");
 const { dialog } = require("electron");
 
 const devServerUrl = process.env.EKKO_RENDERER_URL;
@@ -175,6 +176,44 @@ function getAutoLaunchEnabled() {
   return app.getLoginItemSettings(getAutoLaunchOptions(false)).openAtLogin;
 }
 
+function sanitizeFileName(fileName) {
+  const safeName = String(fileName || "ekko-voice.wav")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+  return safeName || "ekko-voice.wav";
+}
+
+function toBuffer(data) {
+  if (ArrayBuffer.isView(data)) {
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  }
+
+  if (data && Object.prototype.toString.call(data) === "[object ArrayBuffer]") {
+    return Buffer.from(data);
+  }
+
+  throw new Error("Invalid voice message data.");
+}
+
+async function getAvailableFilePath(directory, fileName) {
+  const parsed = path.parse(fileName);
+  const extension = parsed.ext || ".wav";
+  const baseName = parsed.name || "ekko-voice";
+  let candidate = path.join(directory, `${baseName}${extension}`);
+  let index = 1;
+
+  while (true) {
+    try {
+      await fs.access(candidate);
+      candidate = path.join(directory, `${baseName} (${index})${extension}`);
+      index += 1;
+    } catch {
+      return candidate;
+    }
+  }
+}
+
 app.on("second-instance", () => showMainWindow());
 
 app.whenReady().then(() => {
@@ -196,6 +235,18 @@ app.whenReady().then(() => {
     }
 
     return result.filePaths[0];
+  });
+  ipcMain.handle("app:save-voice-message", async (_event, payload) => {
+    const directory = typeof payload?.directory === "string" && payload.directory
+      ? payload.directory
+      : app.getPath("downloads");
+    const fileName = sanitizeFileName(payload?.fileName);
+    const data = toBuffer(payload?.data);
+
+    await fs.mkdir(directory, { recursive: true });
+    const targetPath = await getAvailableFilePath(directory, fileName);
+    await fs.writeFile(targetPath, data);
+    return { path: targetPath };
   });
   ipcMain.handle("app:set-view", (_event, view) => {
     applyViewBounds(view);

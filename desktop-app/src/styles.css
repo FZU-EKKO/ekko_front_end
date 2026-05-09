@@ -1089,8 +1089,7 @@ input[type="range"] { accent-color: #fafafa; }
 
 .domain-chip:hover,
 .channel-row:hover,
-.summary-button:hover,
-.chat-submit-button:hover {
+.summary-button:hover {
   background: rgba(255,255,255,0.08);
 }
 
@@ -2269,7 +2268,7 @@ input[type="range"] { accent-color: #fafafa; }
 .conversation-body {
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(220px, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(190px, 0.7fr) minmax(0, 1.3fr); 
 }
 
 .call-roster,
@@ -2281,7 +2280,7 @@ input[type="range"] { accent-color: #fafafa; }
 .call-roster-scroll {
   min-height: 0;
   height: 100%;
-  padding: 14px 0 18px 0;
+  padding: 0px 0 14px 0;
   display: grid;
   overflow: visible;
 }
@@ -2464,7 +2463,7 @@ input[type="range"] { accent-color: #fafafa; }
 
 .chat-panel {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
   padding-top: 6px;
   border-top: 1px solid rgba(255,255,255,0.12);
@@ -2510,9 +2509,9 @@ input[type="range"] { accent-color: #fafafa; }
 
 .voice-input-indicator.is-active {
   opacity: 1;
-  border-color: rgba(120, 255, 190, 0.55);
-  background: rgba(82, 225, 162, 0.16);
-  box-shadow: 0 0 0 1px rgba(82, 225, 162, 0.08), 0 0 14px rgba(82, 225, 162, 0.18);
+  border-color: rgba(255, 255, 255, 0.42);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
 }
 
 .voice-input-indicator-bars {
@@ -2540,7 +2539,7 @@ input[type="range"] { accent-color: #fafafa; }
 }
 
 .voice-input-indicator.is-active .voice-input-indicator-bars span {
-  background: #94ffd0;
+  background: #ffffff;
   animation: voice-input-pulse 0.95s ease-in-out infinite;
 }
 
@@ -2591,7 +2590,7 @@ input[type="range"] { accent-color: #fafafa; }
 .chat-log-list {
   min-height: 0;
   display: grid;
-  gap: 8px;
+  gap: 0px;
   align-content: start;
 }
 
@@ -2641,20 +2640,12 @@ input[type="range"] { accent-color: #fafafa; }
   background: rgba(224,224,230,0.98);
 }
 
-.chat-line {
-  margin: 0;
-  color: #d8d8dd;
-  font-size: 12px;
-  line-height: 1.45;
-  word-break: break-word;
-}
-
 .voice-message-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
-  padding: 4px 0;
+  gap: 1px;
+  padding: 0;
 }
 
 .voice-message-inline {
@@ -2665,7 +2656,7 @@ input[type="range"] { accent-color: #fafafa; }
   gap: 4px;
   color: #d8d8dd;
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.2;
 }
 
 .voice-message-inline-name {
@@ -2694,32 +2685,75 @@ input[type="range"] { accent-color: #fafafa; }
   color: #8f939b;
 }
 
-.voice-message-play-button.compact {
-  min-width: 38px;
+.voice-message-action-button {
+  width: 24px;
   height: 24px;
-  padding: 0 6px;
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 999px;
-  background: rgba(255,255,255,0.05);
-  color: #eef1f5;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.voice-message-play-button.compact.is-playing {
-  background: rgba(106, 167, 255, 0.18);
-  border-color: rgba(106, 167, 255, 0.35);
-}
-
-.chat-input-row {
+  padding: 0;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 30px;
-  gap: 10px;
-  align-items: center;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: rgba(238, 241, 245, 0.78);
+  cursor: pointer;
+  transition: color 140ms ease, transform 140ms ease, opacity 140ms ease;
 }
 
-.summary-button,
-.chat-submit-button {
+.voice-message-action-button:hover,
+.voice-message-action-button:focus-visible,
+.voice-message-action-button.is-playing {
+  background: transparent;
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.voice-message-action-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.voice-message-action-glyph {
+  width: 16px;
+  height: 16px;
+  display: block;
+  background-color: currentColor;
+}
+
+.voice-message-download-button {
+  position: relative;
+}
+
+.voice-message-download-button.is-downloading .voice-message-action-glyph {
+  opacity: 0.62;
+}
+
+.voice-message-download-button.is-downloaded {
+  color: #ffffff;
+}
+
+.voice-message-download-feedback {
+  position: absolute;
+  right: -2px;
+  bottom: calc(100% + 4px);
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  background: rgba(22, 24, 27, 0.94);
+  color: #ffffff;
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.voice-message-download-button.is-downloaded .voice-message-download-feedback {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.summary-button {
   width: 30px;
   height: 30px;
   padding: 0;
@@ -2752,7 +2786,6 @@ input[type="range"] { accent-color: #fafafa; }
 .chat-icon-button:hover .chat-icon-glyph,
 .chat-icon-button:focus-visible .chat-icon-glyph {
   transform: scale(1.04);
-  filter: drop-shadow(0 0 6px rgba(255,255,255,0.24));
 }
 
 .chat-icon-button.is-busy {
@@ -2760,17 +2793,19 @@ input[type="range"] { accent-color: #fafafa; }
   cursor: wait;
 }
 
-.chat-input-shell {
-  min-width: 0;
-  height: 38px;
-  display: flex;
-  align-items: flex-end;
-  border-bottom: 2px solid rgba(255,255,255,0.24);
-  transition: border-color 140ms ease;
+.channel-analysis-modal {
+  position: relative;
+  width: min(680px, calc(100vw - 64px));
 }
 
-.channel-analysis-modal {
-  width: min(680px, calc(100vw - 64px));
+.channel-analysis-head {
+  padding-right: 34px;
+}
+
+.channel-analysis-close {
+  position: absolute;
+  top: 16px;
+  right: 18px;
 }
 
 .channel-analysis-range-modal {
@@ -2808,27 +2843,6 @@ input[type="range"] { accent-color: #fafafa; }
   color: #eef1f5;
   font-size: 13px;
   line-height: 1.6;
-}
-
-.chat-input-shell:focus-within {
-  border-bottom-color: #ffffff;
-}
-
-.chat-input-shell input {
-  width: 100%;
-  min-height: 0;
-  height: 24px;
-  padding: 0 0 2px 0;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  color: #f4f4f5;
-  outline: none;
-  line-height: 1;
-}
-
-.chat-input-shell input::placeholder {
-  color: #7e8188;
 }
 
 .members-panel {
