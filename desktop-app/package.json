@@ -1,7 +1,7 @@
 {
   "name": "ekko-desktop",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Desktop frontend shell for EKKO voice chat.",
   "author": "EKKO",
   "type": "module",

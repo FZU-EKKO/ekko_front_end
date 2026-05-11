@@ -20,6 +20,8 @@ let tray = null;
 let isQuitting = false;
 let minimizeToTrayOnClose = true;
 let currentView = "login";
+let quitCleanupCompleted = false;
+let quitCleanupInProgress = false;
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -83,6 +85,41 @@ function applyViewBounds(view) {
   currentView = view;
 }
 
+function requestRendererQuitCleanup() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      ipcMain.removeListener("app:renderer-ready-to-quit", handleReady);
+      resolve();
+    }, 2500);
+
+    function handleReady() {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    }
+
+    ipcMain.once("app:renderer-ready-to-quit", handleReady);
+    mainWindow.webContents.send("app:prepare-quit");
+  });
+}
+
+function requestGracefulQuit() {
+  isQuitting = true;
+  app.quit();
+}
+
 function createTray() {
   if (tray) {
     return tray;
@@ -95,10 +132,7 @@ function createTray() {
       { label: "显示窗口", click: () => showMainWindow() },
       {
         label: "退出",
-        click: () => {
-          isQuitting = true;
-          app.quit();
-        },
+        click: () => requestGracefulQuit(),
       },
     ]),
   );
@@ -138,7 +172,8 @@ function createWindow() {
       return;
     }
 
-    isQuitting = true;
+    event.preventDefault();
+    requestGracefulQuit();
   });
 
   window.on("closed", () => {
@@ -217,6 +252,15 @@ async function getAvailableFilePath(directory, fileName) {
 app.on("second-instance", () => showMainWindow());
 
 app.whenReady().then(() => {
+  ipcMain.on("app:log-diagnostic", (_event, message, details) => {
+    const label = typeof message === "string" && message ? message : "renderer diagnostic";
+    if (details === undefined) {
+      console.log(`[EKKO] ${label}`);
+      return;
+    }
+
+    console.log(`[EKKO] ${label}`, details);
+  });
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:get-auto-launch", () => getAutoLaunchEnabled());
   ipcMain.handle("app:set-auto-launch", (_event, enabled) => {
@@ -282,8 +326,7 @@ app.whenReady().then(() => {
       return true;
     }
 
-    isQuitting = true;
-    app.quit();
+    requestGracefulQuit();
     return true;
   });
 
@@ -301,7 +344,20 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   isQuitting = true;
+
+  if (quitCleanupCompleted || quitCleanupInProgress) {
+    return;
+  }
+
+  event.preventDefault();
+  quitCleanupInProgress = true;
+  requestRendererQuitCleanup()
+    .finally(() => {
+      quitCleanupCompleted = true;
+      quitCleanupInProgress = false;
+      app.quit();
+    });
 });
 

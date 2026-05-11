@@ -340,6 +340,8 @@ input[type="range"] { accent-color: #fafafa; }
 
 .drag-region { -webkit-app-region: drag; }
 .no-drag, .no-drag * { -webkit-app-region: no-drag; }
+.window-drag-gap { -webkit-app-region: drag; }
+.window-drag-gap > * { -webkit-app-region: no-drag; }
 .auth-card * { -webkit-app-region: no-drag; }
 .topbar-status, .topbar-actions { display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
 .pill {

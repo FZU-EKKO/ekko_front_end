@@ -10,6 +10,8 @@ interface ElectronAPI {
   saveVoiceMessage: (payload: { directory?: string; fileName: string; data: ArrayBuffer }) => Promise<{ path: string }>;
   setView: (view: DesktopView) => Promise<boolean>;
   setMinimizeOnClose: (enabled: boolean) => Promise<boolean>;
+  logDiagnostic: (message: string, details?: unknown) => void;
+  onPrepareQuit: (callback: () => Promise<void> | void) => () => void;
   minimizeWindow: () => Promise<boolean>;
   toggleMaximizeWindow: () => Promise<boolean>;
   closeWindow: () => Promise<boolean>;

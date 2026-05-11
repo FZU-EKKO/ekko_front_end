@@ -226,6 +226,87 @@ function supportsSetSinkId(element: HTMLMediaElement): element is HTMLMediaEleme
   return typeof (element as HTMLMediaElement & { setSinkId?: unknown }).setSinkId === "function";
 }
 
+let channelJoinSoundUrl: string | null = null;
+
+function createChannelJoinSoundUrl() {
+  if (channelJoinSoundUrl) {
+    return channelJoinSoundUrl;
+  }
+
+  const sampleRate = 44100;
+  const durationSeconds = 0.58;
+  const sampleCount = Math.floor(sampleRate * durationSeconds);
+  const bytesPerSample = 2;
+  const buffer = new ArrayBuffer(44 + sampleCount * bytesPerSample);
+  const view = new DataView(buffer);
+
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + sampleCount * bytesPerSample, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 8 * bytesPerSample, true);
+  writeString(36, "data");
+  view.setUint32(40, sampleCount * bytesPerSample, true);
+
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const time = sampleIndex / sampleRate;
+    const firstTone = time < 0.22;
+    const secondTone = time >= 0.29 && time < 0.52;
+    let sample = 0;
+
+    if (firstTone || secondTone) {
+      const toneStart = firstTone ? 0 : 0.29;
+      const toneTime = time - toneStart;
+      const frequency = firstTone ? 392 : 523.25;
+      const envelope = Math.min(1, toneTime / 0.035) * Math.max(0, 1 - toneTime / 0.28);
+      sample = Math.sin(2 * Math.PI * frequency * toneTime) * envelope * 0.28;
+      sample += Math.sin(2 * Math.PI * frequency * 1.5 * toneTime) * envelope * 0.025;
+    }
+
+    view.setInt16(44 + sampleIndex * bytesPerSample, Math.round(sample * 32767), true);
+  }
+
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let index = 0; index < bytes.length; index += 1) {
+    binary += String.fromCharCode(bytes[index]);
+  }
+
+  channelJoinSoundUrl = `data:audio/wav;base64,${btoa(binary)}`;
+  return channelJoinSoundUrl;
+}
+
+async function playChannelJoinSound(settings: Pick<SettingsState, "outputDevice">) {
+  const player = new Audio(createChannelJoinSoundUrl());
+  player.volume = 0.42;
+
+  if (supportsSetSinkId(player)) {
+    try {
+      await player.setSinkId(settings.outputDevice === "default" ? "" : settings.outputDevice);
+    } catch {
+      // Use the runtime default output if the selected device cannot be routed.
+    }
+  }
+
+  try {
+    await player.play();
+  } catch {
+    // Joining a channel should not fail just because the runtime blocks notification playback.
+  }
+}
+
 function normalizeVoiceJoinResponse(payload: RawVoiceJoinResponse): VoiceJoinResponse {
   return {
     serverUrl: payload.serverUrl ?? payload.server_url ?? payload.livekit_url ?? "",
@@ -2231,6 +2312,8 @@ export default function App() {
   const pendingTranscriptionIdsRef = useRef<Set<number>>(new Set());
   const latestVoiceMessagesRef = useRef<VoiceMessage[]>([]);
   const deferredVoiceMessagesRef = useRef<VoiceMessage[] | null>(null);
+  const voiceMessagesChannelIdRef = useRef<number | null>(null);
+  const voiceMessagesShouldStickToBottomRef = useRef(false);
   const sentenceRecorderRef = useRef<{
     stop: () => Promise<void>;
   } | null>(null);
@@ -2239,6 +2322,8 @@ export default function App() {
   const joinedChannelIdRef = useRef<number | null>(null);
   const selfMicMutedRef = useRef(false);
   const voiceDisconnectingRef = useRef(false);
+  const activeChannelLeavePromiseRef = useRef<Promise<void> | null>(null);
+  const joinFlowActiveRef = useRef(false);
   const downloadFeedbackTimerRef = useRef<number | null>(null);
   const autoLaunchSyncReadyRef = useRef(false);
   const settingsSyncReadyRef = useRef(false);
@@ -2357,32 +2442,69 @@ export default function App() {
   useEffect(
     () => {
       const leaveActiveChannel = () => {
-        const activeToken = tokenRef.current;
-        const activeChannelId = joinedChannelIdRef.current;
-        if (!activeToken || !activeChannelId) {
-          return;
-        }
-
-        fetch(`${API_BASE}/channels/leave`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${activeToken}`,
-          },
-          body: JSON.stringify({ channel_id: activeChannelId }),
-          keepalive: true,
-        }).catch(() => undefined);
+        void leaveCurrentChannel({ keepalive: true, clearLocal: false });
       };
+      const removePrepareQuitListener = window.electronAPI?.onPrepareQuit(() => leaveCurrentChannel({ keepalive: false, clearLocal: false }));
 
       window.addEventListener("pagehide", leaveActiveChannel);
       window.addEventListener("beforeunload", leaveActiveChannel);
       return () => {
         window.removeEventListener("pagehide", leaveActiveChannel);
         window.removeEventListener("beforeunload", leaveActiveChannel);
+        removePrepareQuitListener?.();
       };
     },
     [],
   );
+
+  function requestLeaveChannel(channelId: number, sessionToken: string, keepalive = false) {
+    return fetch(`${API_BASE}/channels/leave`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify({ channel_id: channelId }),
+      keepalive,
+    })
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
+
+  async function leaveCurrentChannel({
+    nextState = "disconnected",
+    keepalive = false,
+    clearLocal = true,
+  }: {
+    nextState?: VoiceConnectionState;
+    keepalive?: boolean;
+    clearLocal?: boolean;
+  } = {}) {
+    const activeToken = tokenRef.current;
+    const activeChannelId = joinedChannelIdRef.current;
+
+    if (activeToken && activeChannelId) {
+      if (!activeChannelLeavePromiseRef.current) {
+        const leavePromise = requestLeaveChannel(activeChannelId, activeToken, keepalive)
+          .finally(() => {
+            if (activeChannelLeavePromiseRef.current === leavePromise) {
+              activeChannelLeavePromiseRef.current = null;
+            }
+          });
+
+        activeChannelLeavePromiseRef.current = leavePromise;
+      }
+
+      await activeChannelLeavePromiseRef.current;
+    }
+
+    joinedChannelIdRef.current = null;
+    setJoinedChannelId(null);
+
+    if (clearLocal) {
+      await clearVoiceSessionState(nextState);
+    }
+  }
 
   async function handleSelectDownloadPath() {
     try {
@@ -2405,12 +2527,23 @@ export default function App() {
     pendingTranscriptionIdsRef.current.add(voiceMessageId);
     try {
       const updated = await transcribeVoiceMessage(voiceMessageId, accessToken);
+      if (updated.channel_id !== voiceMessagesChannelIdRef.current) {
+        return;
+      }
       setVoiceMessages((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     } catch {
       // Keep silent here. Upload route already attempts ASR automatically.
     } finally {
       pendingTranscriptionIdsRef.current.delete(voiceMessageId);
     }
+  }
+
+  function triggerPendingVoiceMessageTranscriptions(messages: VoiceMessage[], accessToken: string, channelId: number) {
+    messages
+      .filter((item) => item.channel_id === channelId && !item.transcript_text?.trim())
+      .forEach((item) => {
+        void triggerVoiceMessageTranscription(item.id, accessToken);
+      });
   }
 
   function applyDeferredVoiceMessages() {
@@ -2420,7 +2553,11 @@ export default function App() {
     }
 
     deferredVoiceMessagesRef.current = null;
-    setVoiceMessages((current) => mergeVoiceMessages(current, deferred));
+    setVoiceMessages((current) => mergeVoiceMessages(current.filter((item) => item.channel_id === voiceMessagesChannelIdRef.current), deferred));
+  }
+
+  function stickVoiceMessagesToBottomAfterRender() {
+    voiceMessagesShouldStickToBottomRef.current = true;
   }
 
   async function loadVoiceMessagesForChannel(channelId: number, accessToken: string, silent = false) {
@@ -2430,29 +2567,33 @@ export default function App() {
 
     try {
       const page = await fetchVoiceMessages(channelId, accessToken);
+      if (voiceMessagesChannelIdRef.current !== channelId) {
+        return;
+      }
+
       const nextMessages = page.voice_messages ?? [];
       const viewport = voiceMessagesViewportRef.current;
       const shouldApplyUpdate = !silent || !viewport || isViewportNearBottom(viewport);
       if (shouldApplyUpdate) {
         deferredVoiceMessagesRef.current = null;
-        setVoiceMessages((current) => mergeVoiceMessages(current, nextMessages));
+        setVoiceMessages((current) => (silent ? mergeVoiceMessages(current.filter((item) => item.channel_id === channelId), nextMessages) : nextMessages));
+        if (!silent) {
+          stickVoiceMessagesToBottomAfterRender();
+        }
       } else {
-        const diffCount = countVoiceMessageDiffs(latestVoiceMessagesRef.current, nextMessages);
+        const diffCount = countVoiceMessageDiffs(latestVoiceMessagesRef.current.filter((item) => item.channel_id === channelId), nextMessages);
         if (diffCount > 0) {
           deferredVoiceMessagesRef.current = nextMessages;
         }
       }
 
-      const pendingMessage = nextMessages.find((item) => !item.transcript_text?.trim());
-      if (pendingMessage) {
-        void triggerVoiceMessageTranscription(pendingMessage.id, accessToken);
-      }
+      triggerPendingVoiceMessageTranscriptions(nextMessages, accessToken, channelId);
     } catch (error) {
-      if (!silent) {
+      if (!silent && voiceMessagesChannelIdRef.current === channelId) {
         setMessage(formatApiError(error, "语音消息加载失败，请稍后重试。"));
       }
     } finally {
-      if (!silent) {
+      if (!silent && voiceMessagesChannelIdRef.current === channelId) {
         setVoiceMessagesLoading(false);
       }
     }
@@ -2603,16 +2744,24 @@ export default function App() {
           return;
         }
 
+        if (voiceMessagesChannelIdRef.current !== activeChannelId) {
+          setVadDebugStatus(`VAD upload success outside active channel: message=${uploaded.id}`);
+          return;
+        }
+
         const viewport = voiceMessagesViewportRef.current;
         const shouldApplyUpdate = !viewport || isViewportNearBottom(viewport);
         if (shouldApplyUpdate) {
           deferredVoiceMessagesRef.current = null;
-          setVoiceMessages((current) => mergeVoiceMessages(current, [uploaded]));
+          setVoiceMessages((current) => mergeVoiceMessages(current.filter((item) => item.channel_id === activeChannelId), [uploaded]));
           setVadDebugStatus(`VAD upload success: message=${uploaded.id}`);
           return;
         }
 
-        const mergedDeferred = mergeVoiceMessages(deferredVoiceMessagesRef.current ?? latestVoiceMessagesRef.current, [uploaded]);
+        const mergedDeferred = mergeVoiceMessages(
+          deferredVoiceMessagesRef.current ?? latestVoiceMessagesRef.current.filter((item) => item.channel_id === activeChannelId),
+          [uploaded],
+        );
         deferredVoiceMessagesRef.current = mergedDeferred;
         setVadDebugStatus(`VAD upload success (deferred): message=${uploaded.id}`);
       })
@@ -2839,7 +2988,7 @@ export default function App() {
     }
 
     const syncChannels = () => {
-      void loadChannels(selectedDomainId, token);
+      void loadChannels(selectedDomainId, token, true);
     };
 
     const timerId = window.setInterval(syncChannels, 3000);
@@ -2847,12 +2996,24 @@ export default function App() {
   }, [selectedDomainId, token]);
 
   useEffect(() => {
-    if (!selectedDomainId || Object.prototype.hasOwnProperty.call(domainMembersByDomain, selectedDomainId) || !token) {
+    if (!selectedDomainId || !token) {
       return;
     }
 
     void loadDomainMembers(selectedDomainId, token);
-  }, [selectedDomainId, domainMembersByDomain, token]);
+  }, [selectedDomainId, token]);
+
+  useEffect(() => {
+    if (!selectedDomainId || !token) {
+      return;
+    }
+
+    const timerId = window.setInterval(() => {
+      void loadDomainMembers(selectedDomainId, token, true);
+    }, 10000);
+
+    return () => window.clearInterval(timerId);
+  }, [selectedDomainId, token]);
 
   const sortedDomains = useMemo(
     () =>
@@ -2927,12 +3088,12 @@ export default function App() {
   );
   const displayedVoiceMessages = useMemo(
     () =>
-      [...voiceMessages].sort(
+      voiceMessages.filter((item) => item.channel_id === conversationChannelId).sort(
         (left, right) =>
           new Date(left.created_at).getTime() - new Date(right.created_at).getTime() ||
           left.id - right.id,
       ),
-    [voiceMessages],
+    [conversationChannelId, voiceMessages],
   );
   const activeVoiceInputParticipants = useMemo(
     () => voiceParticipants.filter((participant) => participant.audioEnabled && participant.isSpeaking),
@@ -2946,11 +3107,14 @@ export default function App() {
       ? `输入中：${activeVoiceInputParticipants.map((participant) => participant.displayName).join("、")}`
       : "当前没有音频输入";
   useEffect(() => {
+    voiceMessagesChannelIdRef.current = conversationChannelType === "text" ? null : conversationChannelId;
+    setVoiceMessages([]);
+    setVoiceMessagesLoading(false);
+    pendingTranscriptionIdsRef.current.clear();
+    deferredVoiceMessagesRef.current = null;
+    voiceMessagesShouldStickToBottomRef.current = false;
+
     if (!conversationChannelId || !token || conversationChannelType === "text") {
-      setVoiceMessages([]);
-      setVoiceMessagesLoading(false);
-      pendingTranscriptionIdsRef.current.clear();
-      deferredVoiceMessagesRef.current = null;
       return;
     }
 
@@ -2968,6 +3132,22 @@ export default function App() {
 
     return () => window.clearInterval(timerId);
   }, [conversationChannelId, conversationChannelType, token]);
+
+  useEffect(() => {
+    if (!voiceMessagesShouldStickToBottomRef.current || voiceMessagesLoading) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const viewport = voiceMessagesViewportRef.current;
+      if (viewport) {
+        viewport.scrollTop = viewport.scrollHeight;
+      }
+      voiceMessagesShouldStickToBottomRef.current = false;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [displayedVoiceMessages, voiceMessagesLoading]);
 
   useEffect(() => {
     const viewport = voiceMessagesViewportRef.current;
@@ -3284,8 +3464,8 @@ export default function App() {
     };
   }, []);
 
-  function clearWorkspace(nextMessage = "") {
-    void clearVoiceSessionState();
+  async function clearWorkspace(nextMessage = "") {
+    await leaveCurrentChannel();
     localStorage.removeItem(TOKEN_KEY);
     setToken(null);
     setUser(null);
@@ -3365,7 +3545,7 @@ export default function App() {
     }
   }
 
-  async function loadChannels(domainId: string, sessionToken: string) {
+  async function loadChannels(domainId: string, sessionToken: string, silent = false) {
     try {
       const channelPage = await request<{ total: number; channel_infos: Channel[] }>(`/channels/list_by_domain/${domainId}`, undefined, sessionToken);
       const channels = channelPage.channel_infos ?? [];
@@ -3377,6 +3557,10 @@ export default function App() {
         return { ...current, [domainId]: channels };
       });
     } catch (error) {
+      if (silent) {
+        return;
+      }
+
       setChannelsByDomain((current) => ({
         ...current,
         [domainId]: [],
@@ -3744,19 +3928,40 @@ export default function App() {
     await handleSendCodeFeedback(email, setMessage);
   }
 
-  async function loadDomainMembers(domainId: string, sessionToken: string) {
+  async function loadDomainMembers(domainId: string, sessionToken: string, silent = false) {
     try {
-      const memberPage = await request<{ total: number; domain_infos: DomainMemberInfo[] }>(
-        "/domains/get_domain_member_infos",
-        {
-          method: "POST",
-          body: JSON.stringify({ domain_id: domainId }),
-        },
-        sessionToken,
-      );
-      const members = (memberPage.domain_infos ?? []).map(mapDomainMemberRecord);
+      const pageSize = 100;
+      let currentPage = 1;
+      let total = 0;
+      const allMembers: DomainMemberInfo[] = [];
+
+      do {
+        const memberPage = await request<{ total: number; domain_infos: DomainMemberInfo[] }>(
+          `/domains/get_domain_member_infos?current_page=${currentPage}&page_size=${pageSize}`,
+          {
+            method: "POST",
+            body: JSON.stringify({ domain_id: domainId }),
+          },
+          sessionToken,
+        );
+        const pageMembers = memberPage.domain_infos ?? [];
+        total = memberPage.total ?? pageMembers.length;
+        allMembers.push(...pageMembers);
+
+        if (!pageMembers.length) {
+          break;
+        }
+
+        currentPage += 1;
+      } while (allMembers.length < total);
+
+      const members = allMembers.map(mapDomainMemberRecord);
       setDomainMembersByDomain((current) => ({ ...current, [domainId]: members }));
     } catch (error) {
+      if (silent) {
+        return;
+      }
+
       setDomainMembersByDomain((current) => ({
         ...current,
         [domainId]: [],
@@ -4103,7 +4308,6 @@ export default function App() {
   }
 
   function logout() {
-    void clearVoiceSessionState();
     settingsSyncReadyRef.current = false;
     clearWorkspace("已退出登录。");
     setAuthMode("login");
@@ -4263,25 +4467,10 @@ export default function App() {
 
   async function handleLeaveChannel() {
     const channelId = joinedChannelId;
-    if (token && joinedChannelId) {
-      try {
-        await request<null>(
-          "/channels/leave",
-          {
-            method: "POST",
-            body: JSON.stringify({ channel_id: joinedChannelId }),
-          },
-          token,
-        );
-      } catch {
-        // Keep local teardown even if the backend-side leave call fails.
-      }
-    }
-    await clearVoiceSessionState("disconnected");
+    await leaveCurrentChannel();
     if (token && selectedDomainId && channelId) {
       void loadChannels(selectedDomainId, token);
     }
-    setJoinedChannelId(null);
     setMessage("已离开当前语音会话。");
   }
 
@@ -4303,8 +4492,8 @@ export default function App() {
     closeDomainAvatarModal();
   }
 
-  function removeDomainFromWorkspace(domainId: string, successMessage: string) {
-    void clearVoiceSessionState();
+  async function removeDomainFromWorkspace(domainId: string, successMessage: string) {
+    await leaveCurrentChannel();
     const nextDomains = domains.filter((domain) => domain.id !== domainId);
     const nextSelectedDomainId = sortedDomains.find((domain) => domain.id !== domainId)?.id ?? null;
 
@@ -4491,7 +4680,7 @@ export default function App() {
     }
 
     await loadDomains(token, user);
-    void clearVoiceSessionState();
+    await leaveCurrentChannel();
     setSelectedDomainId(domain.id);
     setSelectedChannelId(null);
     setJoinedChannelId(null);
@@ -4510,28 +4699,39 @@ export default function App() {
   }
 
   async function handleJoinChannel(channel: Channel) {
+    if (joinFlowActiveRef.current) {
+      return;
+    }
+
+    joinFlowActiveRef.current = true;
     setSelectedChannelId(channel.id);
     setChannelContextMenu(null);
+    const wasJoinedToTargetChannel = joinedChannelId === channel.id;
 
-    if (channel.channel_type === "voice") {
-      setVoiceError("");
-      setVoiceConnectionState("joining");
-      setJoinDebugStatus("Join voice: begin");
-      setVadDebugStatus("VAD idle");
+    try {
+      if (channel.channel_type === "voice") {
+        if (wasJoinedToTargetChannel && voiceConnectionState === "connected") {
+          return;
+        }
+
+        setVoiceError("");
+        setVoiceConnectionState("joining");
+        setJoinDebugStatus("Join voice: begin");
+        setVadDebugStatus("VAD idle");
 
       try {
-        if (token && joinedChannelId && joinedChannelId !== channel.id) {
-          await request<null>(
-            "/channels/leave",
-            {
-              method: "POST",
-              body: JSON.stringify({ channel_id: joinedChannelId }),
-            },
-            token,
-          ).catch(() => undefined);
+        if (joinedChannelId && joinedChannelId !== channel.id) {
+          await leaveCurrentChannel({ nextState: "joining" });
         }
 
         const joinSession = await joinVoiceChannel(channel);
+        window.electronAPI?.logDiagnostic("LiveKit join session", {
+          channelId: channel.id,
+          channelName: channel.channel_name,
+          serverUrl: joinSession.serverUrl,
+          roomName: joinSession.roomName,
+          participantIdentity: joinSession.participantIdentity,
+        });
         await clearVoiceSessionState();
 
         if (ENABLE_VOICE_JOIN_MOCK) {
@@ -4549,6 +4749,8 @@ export default function App() {
           ]);
           setVoiceConnectionState("connected");
           setJoinedChannelId(channel.id);
+          joinedChannelIdRef.current = channel.id;
+          void playChannelJoinSound(settings);
           if (selectedDomain && token) {
             await loadChannels(selectedDomain.id, token);
           }
@@ -4606,7 +4808,7 @@ export default function App() {
             if (voiceDisconnectingRef.current) {
               return;
             }
-            void clearVoiceSessionState("disconnected");
+            void leaveCurrentChannel({ nextState: "disconnected" });
             if (selectedDomain && token) {
               void loadChannels(selectedDomain.id, token);
             }
@@ -4623,6 +4825,8 @@ export default function App() {
         syncVoiceParticipantsFromRoom(room);
         setVoiceConnectionState("connected");
         setJoinedChannelId(channel.id);
+        joinedChannelIdRef.current = channel.id;
+        void playChannelJoinSound(settings);
         setJoinDebugStatus("Join voice: ready");
         if (selectedDomain && token) {
           await loadChannels(selectedDomain.id, token);
@@ -4630,6 +4834,12 @@ export default function App() {
         setMessage(`已连接到 ${channel.channel_name} 的语音房间。`);
       } catch (error) {
         await clearVoiceSessionState();
+        if (token && !wasJoinedToTargetChannel) {
+          await requestLeaveChannel(channel.id, token);
+          if (selectedDomain) {
+            await loadChannels(selectedDomain.id, token).catch(() => undefined);
+          }
+        }
         setJoinedChannelId(null);
         setVoiceConnectionState("failed");
         setJoinDebugStatus(`Join voice failed: ${formatApiError(error, "unknown error")}`);
@@ -4640,9 +4850,14 @@ export default function App() {
       return;
     }
 
-    await clearVoiceSessionState("disconnected");
+    await leaveCurrentChannel();
     setJoinedChannelId(channel.id);
+    joinedChannelIdRef.current = channel.id;
+    void playChannelJoinSound(settings);
     setMessage(`已进入文字频道 ${channel.channel_name}。`);
+    } finally {
+      joinFlowActiveRef.current = false;
+    }
   }
 
   async function handleCopyDomainId() {
@@ -5086,8 +5301,7 @@ export default function App() {
       }
 
       if (joinedChannelId === channel.id) {
-        void clearVoiceSessionState("disconnected");
-        setJoinedChannelId(null);
+        void leaveCurrentChannel();
       }
 
       setChannelContextMenu(null);
@@ -5175,7 +5389,7 @@ export default function App() {
 
   function handleSummarizeConversation() {
     const now = new Date();
-    const lastMessageTime = voiceMessages.length ? new Date(voiceMessages[voiceMessages.length - 1].created_at) : null;
+    const lastMessageTime = displayedVoiceMessages.length ? new Date(displayedVoiceMessages[displayedVoiceMessages.length - 1].created_at) : null;
     const endTime = lastMessageTime && !Number.isNaN(lastMessageTime.getTime()) ? lastMessageTime : now;
     setAnalysisRangeError("");
     setAnalysisRangeForm({
@@ -6378,7 +6592,7 @@ export default function App() {
 
           <main className="stage-panel no-drag">
             <section className="conversation-panel">
-              <div className="conversation-head">
+              <div className="conversation-head window-drag-gap">
                 <div className="conversation-head-main">
                   <h1>{conversationChannel?.channel_name ?? "\u672a\u8fdb\u5165\u9891\u9053"}</h1>
                   <span>{conversationChannel ? formatCount(getVisibleChannelCount(conversationChannel, joinedChannelId, joinedVoiceCount), conversationChannel.max_capacity) : "--/--"}</span>
