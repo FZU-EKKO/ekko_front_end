@@ -6622,6 +6622,7 @@ export default function App() {
                                   glyphUrl={selfMicMuted ? MICROPHONE_SLASH_URL : MICROPHONE_URL}
                                   value={settings.micLevel}
                                   onChange={(value) => setSettings((current) => ({ ...current, micLevel: value }))}
+                                  active={selfMicMuted}
                                   onClick={handleToggleSelfMic}
                                 />
                                 <HoverVolumeControl
