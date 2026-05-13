@@ -93,6 +93,7 @@ export interface VoiceMessage {
   mime_type?: string | null;
   file_size: number;
   transcript_text?: string | null;
+  transcription_status: "pending" | "processing" | "done" | "failed" | "dropped";
   waveform?: number[] | null;
   avg_amplitude?: number | null;
   avg_frequency?: number | null;

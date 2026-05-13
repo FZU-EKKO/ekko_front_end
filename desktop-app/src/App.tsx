@@ -2540,7 +2540,12 @@ export default function App() {
 
   function triggerPendingVoiceMessageTranscriptions(messages: VoiceMessage[], accessToken: string, channelId: number) {
     messages
-      .filter((item) => item.channel_id === channelId && !item.transcript_text?.trim())
+      .filter(
+        (item) =>
+          item.channel_id === channelId &&
+          !item.transcript_text?.trim() &&
+          (item.transcription_status === "pending" || item.transcription_status === "processing"),
+      )
       .forEach((item) => {
         void triggerVoiceMessageTranscription(item.id, accessToken);
       });
