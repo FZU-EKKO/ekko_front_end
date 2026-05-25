@@ -41,6 +41,7 @@ const ENABLE_VOICE_JOIN_MOCK = (import.meta.env.VITE_ENABLE_VOICE_JOIN_MOCK ?? "
 const TEMP_VOICE_DEBUG_UI = false;
 const TOKEN_KEY = "ekko.desktop.token";
 const SETTINGS_KEY = "ekko.desktop.settings";
+const VERIFY_CODE_COOLDOWN_MS = 30_000;
 const ASSET_BASE = import.meta.env.BASE_URL;
 const APP_LOGO_URL = `${ASSET_BASE}assets/EKKO.png`;
 const WORKSPACE_LOGO_URL = `${ASSET_BASE}assets/EKKO.png`;
@@ -1300,8 +1301,14 @@ async function request<T>(path: string, init?: RequestInit, token?: string): Pro
     const rawBody = await response.text();
     if (rawBody) {
       try {
-        const body = JSON.parse(rawBody) as { detail?: string };
-        detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body);
+        const body = JSON.parse(rawBody) as { detail?: unknown; message?: unknown };
+        if (typeof body.detail === "string") {
+          detail = body.detail;
+        } else if (typeof body.message === "string") {
+          detail = body.message;
+        } else {
+          detail = JSON.stringify(body);
+        }
       } catch {
         detail = rawBody;
       }
@@ -1461,6 +1468,18 @@ function formatApiError(error: unknown, fallback: string) {
 
 function isValidEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function normalizeVerificationEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+function getVerificationCooldownSeconds(email: string, cooldowns: Record<string, number>, now: number) {
+  const cooldownUntil = cooldowns[normalizeVerificationEmail(email)];
+  if (!cooldownUntil) {
+    return 0;
+  }
+  return Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
 }
 
 function formatMediaAccessError(error: unknown) {
@@ -1636,6 +1655,7 @@ function RegisterView({
   registerForm,
   isSubmitting,
   message,
+  sendCodeCooldownSeconds,
   onChange,
   onSubmit,
   onSendCode,
@@ -1644,6 +1664,7 @@ function RegisterView({
   registerForm: RegisterFormState;
   isSubmitting: boolean;
   message: string;
+  sendCodeCooldownSeconds: number;
   onChange: (field: keyof RegisterFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSendCode: () => void;
@@ -1686,8 +1707,8 @@ function RegisterView({
                 value={registerForm.verificationCode}
                 onChange={(event) => onChange("verificationCode", event.target.value)}
               />
-              <button className="ghost-button verification-button" type="button" onClick={onSendCode}>
-                {"\u53d1\u9001\u9a8c\u8bc1\u7801"}
+              <button className="ghost-button verification-button" type="button" onClick={onSendCode} disabled={sendCodeCooldownSeconds > 0}>
+                {sendCodeCooldownSeconds > 0 ? `${sendCodeCooldownSeconds}s` : "\u53d1\u9001\u9a8c\u8bc1\u7801"}
               </button>
             </div>
           </label>
@@ -1722,6 +1743,7 @@ function ResetPasswordView({
   resetForm,
   isSubmitting,
   message,
+  sendCodeCooldownSeconds,
   onChange,
   onSubmit,
   onSendCode,
@@ -1730,6 +1752,7 @@ function ResetPasswordView({
   resetForm: ResetPasswordFormState;
   isSubmitting: boolean;
   message: string;
+  sendCodeCooldownSeconds: number;
   onChange: (field: keyof ResetPasswordFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSendCode: () => void;
@@ -1748,6 +1771,7 @@ function ResetPasswordView({
           resetForm={resetForm}
           isSubmitting={isSubmitting}
           message={message}
+          sendCodeCooldownSeconds={sendCodeCooldownSeconds}
           onChange={onChange}
           onSubmit={onSubmit}
           onSendCode={onSendCode}
@@ -1764,6 +1788,7 @@ function ResetPasswordForm({
   resetForm,
   isSubmitting,
   message,
+  sendCodeCooldownSeconds,
   onChange,
   onSubmit,
   onSendCode,
@@ -1774,6 +1799,7 @@ function ResetPasswordForm({
   resetForm: ResetPasswordFormState;
   isSubmitting: boolean;
   message: string;
+  sendCodeCooldownSeconds: number;
   onChange: (field: keyof ResetPasswordFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSendCode: () => void;
@@ -1801,8 +1827,8 @@ function ResetPasswordForm({
             value={resetForm.verificationCode}
             onChange={(event) => onChange("verificationCode", event.target.value)}
           />
-          <button className="ghost-button verification-button" type="button" onClick={onSendCode}>
-            {"\u53d1\u9001\u9a8c\u8bc1\u7801"}
+          <button className="ghost-button verification-button" type="button" onClick={onSendCode} disabled={sendCodeCooldownSeconds > 0}>
+            {sendCodeCooldownSeconds > 0 ? `${sendCodeCooldownSeconds}s` : "\u53d1\u9001\u9a8c\u8bc1\u7801"}
           </button>
         </div>
       </label>
@@ -1835,6 +1861,8 @@ function ChangeEmailForm({
   emailForm,
   isSubmitting,
   message,
+  currentCodeCooldownSeconds,
+  nextCodeCooldownSeconds,
   onChange,
   onSubmit,
   onSendCurrentCode,
@@ -1844,6 +1872,8 @@ function ChangeEmailForm({
   emailForm: ChangeEmailFormState;
   isSubmitting: boolean;
   message: string;
+  currentCodeCooldownSeconds: number;
+  nextCodeCooldownSeconds: number;
   onChange: (field: keyof ChangeEmailFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSendCurrentCode: () => void;
@@ -1870,8 +1900,8 @@ function ChangeEmailForm({
             value={emailForm.currentVerificationCode}
             onChange={(event) => onChange("currentVerificationCode", event.target.value)}
           />
-          <button className="ghost-button verification-button" type="button" onClick={onSendCurrentCode}>
-            {"\u53d1\u9001\u9a8c\u8bc1\u7801"}
+          <button className="ghost-button verification-button" type="button" onClick={onSendCurrentCode} disabled={currentCodeCooldownSeconds > 0}>
+            {currentCodeCooldownSeconds > 0 ? `${currentCodeCooldownSeconds}s` : "\u53d1\u9001\u9a8c\u8bc1\u7801"}
           </button>
         </div>
       </label>
@@ -1893,8 +1923,8 @@ function ChangeEmailForm({
             value={emailForm.nextVerificationCode}
             onChange={(event) => onChange("nextVerificationCode", event.target.value)}
           />
-          <button className="ghost-button verification-button" type="button" onClick={onSendNextCode}>
-            {"\u53d1\u9001\u9a8c\u8bc1\u7801"}
+          <button className="ghost-button verification-button" type="button" onClick={onSendNextCode} disabled={nextCodeCooldownSeconds > 0}>
+            {nextCodeCooldownSeconds > 0 ? `${nextCodeCooldownSeconds}s` : "\u53d1\u9001\u9a8c\u8bc1\u7801"}
           </button>
         </div>
       </label>
@@ -2237,6 +2267,8 @@ export default function App() {
   const [isBooting, setIsBooting] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState("");
+  const [verificationCooldowns, setVerificationCooldowns] = useState<Record<string, number>>({});
+  const [verificationCooldownNow, setVerificationCooldownNow] = useState(() => Date.now());
   const [appVersion, setAppVersion] = useState("dev");
   const [loginForm, setLoginForm] = useState<LoginFormState>(defaultLoginForm);
   const [registerForm, setRegisterForm] = useState<RegisterFormState>(defaultRegisterForm);
@@ -2330,6 +2362,37 @@ export default function App() {
   const settingsSyncTimerRef = useRef<number | null>(null);
 
   const currentView: DesktopView = user ? (settingsOpen || domainSettingsOpen ? "settings" : "workspace") : authMode;
+  const registerCodeCooldownSeconds = getVerificationCooldownSeconds(registerForm.email, verificationCooldowns, verificationCooldownNow);
+  const resetCodeCooldownSeconds = getVerificationCooldownSeconds(resetForm.email, verificationCooldowns, verificationCooldownNow);
+  const currentEmailCodeCooldownSeconds = getVerificationCooldownSeconds(changeEmailForm.currentEmail, verificationCooldowns, verificationCooldownNow);
+  const nextEmailCodeCooldownSeconds = getVerificationCooldownSeconds(changeEmailForm.nextEmail, verificationCooldowns, verificationCooldownNow);
+
+  useEffect(() => {
+    if (!Object.values(verificationCooldowns).some((cooldownUntil) => cooldownUntil > Date.now())) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const timestamp = Date.now();
+      setVerificationCooldownNow(timestamp);
+      setVerificationCooldowns((current) => {
+        let changed = false;
+        const next: Record<string, number> = {};
+
+        for (const [email, cooldownUntil] of Object.entries(current)) {
+          if (cooldownUntil > timestamp) {
+            next[email] = cooldownUntil;
+          } else {
+            changed = true;
+          }
+        }
+
+        return changed ? next : current;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [verificationCooldowns]);
 
   useEffect(() => {
     window.electronAPI?.getVersion().then(setAppVersion).catch(() => setAppVersion("dev"));
@@ -4006,6 +4069,7 @@ export default function App() {
 
   async function handleSendCodeFeedback(email: string, setFeedback: (value: string) => void) {
     const normalizedEmail = email.trim();
+    const cooldownKey = normalizeVerificationEmail(normalizedEmail);
 
     if (!normalizedEmail) {
       setFeedback("\u8bf7\u5148\u8f93\u5165\u90ae\u7bb1\uff0c\u518d\u53d1\u9001\u9a8c\u8bc1\u7801\u3002");
@@ -4017,8 +4081,17 @@ export default function App() {
       return;
     }
 
+    const cooldownSeconds = getVerificationCooldownSeconds(normalizedEmail, verificationCooldowns, Date.now());
+    if (cooldownSeconds > 0) {
+      setFeedback(`${cooldownSeconds}s\u540e\u53ef\u91cd\u65b0\u53d1\u9001\u9a8c\u8bc1\u7801\u3002`);
+      return;
+    }
+
     try {
       await request<null>(`/email/send/get_verify_code?email=${encodeURIComponent(normalizedEmail)}&name=user`);
+      const cooldownUntil = Date.now() + VERIFY_CODE_COOLDOWN_MS;
+      setVerificationCooldownNow(Date.now());
+      setVerificationCooldowns((current) => ({ ...current, [cooldownKey]: cooldownUntil }));
       setFeedback("\u9a8c\u8bc1\u7801\u5df2\u53d1\u9001\uff0c\u8bf7\u67e5\u6536\u90ae\u7bb1\u3002");
     } catch (error) {
       setFeedback(formatApiError(error, "\u9a8c\u8bc1\u7801\u53d1\u9001\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"));
@@ -4027,64 +4100,95 @@ export default function App() {
 
   async function handleResetPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const isAccountPasswordChange = accountModal === "password";
+    const setPasswordFeedback = isAccountPasswordChange ? setAccountModalMessage : setMessage;
     const email = resetForm.email.trim();
     const verificationCode = resetForm.verificationCode.trim();
     const pwd = resetForm.pwd.trim();
     const confirmPwd = resetForm.confirmPwd.trim();
 
     if (!email) {
-      setAccountModalMessage("\u8bf7\u8f93\u5165\u90ae\u7bb1\u3002");
+      setPasswordFeedback("\u8bf7\u8f93\u5165\u90ae\u7bb1\u3002");
       return;
     }
 
     if (!isValidEmail(email)) {
-      setAccountModalMessage("\u8bf7\u8f93\u5165\u6b63\u786e\u7684\u90ae\u7bb1\u683c\u5f0f\u3002");
+      setPasswordFeedback("\u8bf7\u8f93\u5165\u6b63\u786e\u7684\u90ae\u7bb1\u683c\u5f0f\u3002");
+      return;
+    }
+
+    if (isAccountPasswordChange && user && email !== user.email) {
+      setPasswordFeedback("\u90ae\u7bb1\u5fc5\u987b\u4e0e\u5f53\u524d\u7ed1\u5b9a\u90ae\u7bb1\u4e00\u81f4\u3002");
       return;
     }
 
     if (!verificationCode) {
-      setAccountModalMessage("\u8bf7\u8f93\u5165\u9a8c\u8bc1\u7801\u3002");
+      setPasswordFeedback("\u8bf7\u8f93\u5165\u9a8c\u8bc1\u7801\u3002");
       return;
     }
 
     if (!pwd) {
-      setAccountModalMessage("\u8bf7\u8f93\u5165\u65b0\u5bc6\u7801\u3002");
+      setPasswordFeedback("\u8bf7\u8f93\u5165\u65b0\u5bc6\u7801\u3002");
       return;
     }
 
     if (pwd.length < 6) {
-      setAccountModalMessage("\u5bc6\u7801\u957f\u5ea6\u4e0d\u80fd\u5c11\u4e8e 6 \u4f4d\u3002");
+      setPasswordFeedback("\u5bc6\u7801\u957f\u5ea6\u4e0d\u80fd\u5c11\u4e8e 6 \u4f4d\u3002");
       return;
     }
 
     if (!confirmPwd) {
-      setAccountModalMessage("\u8bf7\u518d\u6b21\u8f93\u5165\u65b0\u5bc6\u7801\u3002");
+      setPasswordFeedback("\u8bf7\u518d\u6b21\u8f93\u5165\u65b0\u5bc6\u7801\u3002");
       return;
     }
 
     if (pwd !== confirmPwd) {
-      setAccountModalMessage("\u4e24\u6b21\u8f93\u5165\u7684\u5bc6\u7801\u4e0d\u4e00\u81f4\u3002");
+      setPasswordFeedback("\u4e24\u6b21\u8f93\u5165\u7684\u5bc6\u7801\u4e0d\u4e00\u81f4\u3002");
       return;
     }
 
     setIsSubmitting(true);
-    setAccountModalMessage("");
+    setPasswordFeedback("");
 
     try {
-      await request<null>("/users/find_password", {
-        method: "PUT",
-        body: JSON.stringify({
-          email: { name: "user", email },
-          verify_code: verificationCode,
-          new_password: pwd,
-        }),
-      });
-      setResetForm(defaultResetPasswordForm);
-      setAuthMode("login");
-      setAccountModalMessage("\u5bc6\u7801\u5df2\u91cd\u7f6e\uff0c\u8bf7\u4f7f\u7528\u65b0\u5bc6\u7801\u767b\u5f55\u3002");
-      setMessage("\u5bc6\u7801\u5df2\u91cd\u7f6e\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55\u3002");
+      if (isAccountPasswordChange) {
+        if (!token) {
+          throw new Error("登录状态已失效，请重新登录。");
+        }
+        await request<null>(
+          "/users/password",
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              verify_code: verificationCode,
+              new_password: pwd,
+            }),
+          },
+          token,
+        );
+        setResetForm({
+          email,
+          verificationCode: "",
+          pwd: "",
+          confirmPwd: "",
+        });
+        setAccountModalMessage("\u5bc6\u7801\u5df2\u66f4\u65b0\u3002");
+        setMessage("\u5bc6\u7801\u5df2\u66f4\u65b0\u3002");
+      } else {
+        await request<null>("/users/find_password", {
+          method: "PUT",
+          body: JSON.stringify({
+            email,
+            verify_code: verificationCode,
+            new_password: pwd,
+          }),
+        });
+        setResetForm(defaultResetPasswordForm);
+        setAuthMode("login");
+        setMessage("\u5bc6\u7801\u5df2\u91cd\u7f6e\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55\u3002");
+      }
     } catch (error) {
-      setAccountModalMessage(formatApiError(error, "\u4fee\u6539\u5bc6\u7801\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"));
+      setPasswordFeedback(formatApiError(error, "\u4fee\u6539\u5bc6\u7801\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"));
     } finally {
       setIsSubmitting(false);
     }
@@ -5826,6 +5930,7 @@ export default function App() {
             registerForm={registerForm}
             isSubmitting={isSubmitting}
             message={message}
+            sendCodeCooldownSeconds={registerCodeCooldownSeconds}
             onChange={(field, value) => setRegisterForm((current) => ({ ...current, [field]: value }))}
             onSubmit={handleRegister}
             onSendCode={() => handleSendCode(registerForm.email)}
@@ -5839,6 +5944,7 @@ export default function App() {
             resetForm={resetForm}
             isSubmitting={isSubmitting}
             message={message}
+            sendCodeCooldownSeconds={resetCodeCooldownSeconds}
             onChange={(field, value) => setResetForm((current) => ({ ...current, [field]: value }))}
             onSubmit={handleResetPassword}
             onSendCode={() => handleSendCode(resetForm.email)}
@@ -6437,6 +6543,7 @@ export default function App() {
                   resetForm={resetForm}
                   isSubmitting={isSubmitting}
                   message={accountModalMessage}
+                  sendCodeCooldownSeconds={resetCodeCooldownSeconds}
                   onChange={(field, value) => setResetForm((current) => ({ ...current, [field]: value }))}
                   onSubmit={handleResetPassword}
                   onSendCode={() => handleSendCodeFeedback(resetForm.email, setAccountModalMessage)}
@@ -6449,6 +6556,8 @@ export default function App() {
                   emailForm={changeEmailForm}
                   isSubmitting={isSubmitting}
                   message={accountModalMessage}
+                  currentCodeCooldownSeconds={currentEmailCodeCooldownSeconds}
+                  nextCodeCooldownSeconds={nextEmailCodeCooldownSeconds}
                   onChange={(field, value) => setChangeEmailForm((current) => ({ ...current, [field]: value }))}
                   onSubmit={handleChangeEmail}
                   onSendCurrentCode={() => handleSendCodeFeedback(changeEmailForm.currentEmail, setAccountModalMessage)}
